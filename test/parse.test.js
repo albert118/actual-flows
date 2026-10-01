@@ -325,3 +325,104 @@ test('defensive: missing doc and missing fields do not throw', () => {
   assert.equal(r2.payee, null);
   assert.equal(r2.currency, 'AUD');
 });
+
+// --- Stage 3: income-by-document-type (AC11-AC14) ----------------------------
+
+test('AC11: document_type numeric id in incomeSignals.documentTypeIds lands income', () => {
+  // Real Paperless docs carry numeric document_type ids; the resolved id list
+  // must match them (numeric-id path, not the string-name path).
+  const doc = simpleDoc({ document_type: 20, tags: [] });
+  const ctx = {
+    ...baseCtx,
+    incomeSignals: { documentTypes: [], tags: [], documentTypeIds: [20], tagIds: [] },
+  };
+  const r = parseDoc(doc, ctx);
+  assert.equal(r.sign, 'income');
+  assert.equal(r.amount, 5000);
+  assert.equal(r.ok, true);
+});
+
+test('AC12: tag numeric id in incomeSignals.tagIds lands income', () => {
+  const doc = simpleDoc({ document_type: null, tags: [50] });
+  const ctx = {
+    ...baseCtx,
+    incomeSignals: { documentTypes: [], tags: [], documentTypeIds: [], tagIds: [50] },
+  };
+  const r = parseDoc(doc, ctx);
+  assert.equal(r.sign, 'income');
+  assert.equal(r.amount, 5000);
+});
+
+test('AC12b: income by numeric tag id also wins with a manual amount present', () => {
+  const doc = simpleDoc({
+    content: '',
+    document_type: null,
+    tags: [50],
+    custom_fields: [{ name: 'actual_amount', value: '75.00' }],
+  });
+  const ctx = {
+    ...baseCtx,
+    incomeSignals: { documentTypes: [], tags: [], documentTypeIds: [], tagIds: [50] },
+  };
+  const r = parseDoc(doc, ctx);
+  assert.equal(r.sign, 'income');
+  assert.equal(r.amount, 7500);
+});
+
+test('AC13: watch-signal-only doc with no income signal stays expense (v1 bug guard)', () => {
+  // The doc matches a watch signal (tag 'invoice' / document_type 'invoice')
+  // but no income signal — it must NOT flip to income. The id lists here even
+  // contain unrelated ids to prove only exact matches count.
+  const doc = simpleDoc({ document_type: 'invoice', tags: ['invoice'] });
+  const ctx = {
+    ...baseCtx,
+    incomeSignals: { documentTypes: [], tags: [], documentTypeIds: [88], tagIds: [99] },
+  };
+  const r = parseDoc(doc, ctx);
+  assert.equal(r.sign, 'expense');
+  assert.equal(r.amount, -5000);
+});
+
+test('AC13b: numeric watch-style tag id with no income signal stays expense', () => {
+  const doc = simpleDoc({ document_type: 7, tags: [10] });
+  const r = parseDoc(doc, baseCtx); // incomeSignals empty -> expense
+  assert.equal(r.sign, 'expense');
+  assert.equal(r.amount, -5000);
+});
+
+test('AC14: refund keyword in content flips income without any income signal', () => {
+  const doc = simpleDoc({
+    content: 'Refund approved for overpayment\nTotal: $30.00',
+    document_type: null,
+    tags: [],
+  });
+  const ctx = {
+    ...baseCtx,
+    incomeSignals: { documentTypes: [], tags: [], documentTypeIds: [], tagIds: [] },
+  };
+  const r = parseDoc(doc, ctx);
+  assert.equal(r.sign, 'income');
+  assert.equal(r.amount, 3000);
+});
+
+test('Stage3: numeric doc id does not match a string name in incomeSignals', () => {
+  // A real doc with numeric document_type 5 must not stringify-match the
+  // configured name 'invoice', nor the unrelated id 7.
+  const doc = simpleDoc({ document_type: 5, tags: [] });
+  const ctx = {
+    ...baseCtx,
+    incomeSignals: { documentTypes: ['invoice'], tags: [], documentTypeIds: [7], tagIds: [] },
+  };
+  const r = parseDoc(doc, ctx);
+  assert.equal(r.sign, 'expense');
+});
+
+test('Stage3: numeric tag id does not match a string name in incomeSignals', () => {
+  const doc = simpleDoc({ document_type: null, tags: [10] });
+  const ctx = {
+    ...baseCtx,
+    incomeSignals: { documentTypes: [], tags: ['invoice'], documentTypeIds: [], tagIds: [11] },
+  };
+  const r = parseDoc(doc, ctx);
+  assert.equal(r.sign, 'expense');
+});

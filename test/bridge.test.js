@@ -113,12 +113,26 @@ function makePaperless({ candidates = [], tagNames = {}, docTypes = {}, correspo
   return paperless;
 }
 
-/** Fake Actual api handle (the shape connect() returns). */
-function makeActual({ added = [], updated = [], errors = [], shutdown = async () => {} } = {}) {
+/**
+ * Fake Actual api handle (the shape connect() returns). `accounts` lists the
+ * account names that exist; ids are derived as `acct-<lowercased name>` so
+ * `Cash` resolves to `acct-cash` as before. `getIDByName` returns null for
+ * names outside the list, so resolveAccount falls back to getAccounts() and
+ * throws when the account genuinely does not exist.
+ */
+function makeActual({
+  added = [],
+  updated = [],
+  errors = [],
+  shutdown = async () => {},
+  accounts = [CONFIG.actual.defaultAccountName],
+} = {}) {
   const imports = [];
+  const byName = new Map(accounts.map((name) => [name, `acct-${name.toLowerCase()}`]));
   const handle = {
-    getIDByName: async (type, name) => (name === CONFIG.actual.defaultAccountName ? 'acct-cash' : null),
-    getAccounts: async () => [{ id: 'acct-cash', name: CONFIG.actual.defaultAccountName }],
+    getIDByName: async (type, name) => byName.get(name) ?? null,
+    getAccounts: async () =>
+      [...byName].map(([name, id]) => ({ id, name })),
     importTransactions: async (accountId, txns, opts) => {
       imports.push({ accountId, txns, opts });
       return { errors, added, updated };
@@ -429,4 +443,338 @@ test('poll stops cleanly when the abort signal fires (CLI SIGINT/SIGTERM path)',
   assert.ok(passes >= 1, 'at least one pass ran before the stop');
 
   await bridge.shutdown();
+});
+
+// --- Stage 2: per-signal account mapping ------------------------------------
+
+test('AC6: signalled account wins for a matching doc', async () => {
+  const candidate = doc(1, { tags: [10] });
+  const paperless = makePaperless({ candidates: [candidate], tagNames: { bill: 10 } });
+  const actual = makeActual({ added: ['txn-1'], accounts: ['Cash', 'Amex'] });
+  const bridge = createBridge({
+    config: {
+      ...CONFIG,
+      signals: { tags: [{ name: 'bill', account: 'Amex' }], documentTypes: [], correspondents: [] },
+    },
+    paperless,
+    actual,
+    parse: () => GOOD_PARSE,
+  });
+
+  const res = await bridge.import();
+
+  assert.equal(res.results[0].status, 'imported');
+  assert.equal(actual.imports.length, 1);
+  assert.equal(actual.imports[0].accountId, 'acct-amex');
+});
+
+test('AC7: plain-string signals keep the default account', async () => {
+  const candidate = doc(1, { tags: [10] });
+  const paperless = makePaperless({ candidates: [candidate], tagNames: { invoice: 10 } });
+  const actual = makeActual({ added: ['txn-1'], accounts: ['Cash', 'Amex'] });
+  const bridge = createBridge({
+    config: { ...CONFIG, signals: { tags: ['invoice'], documentTypes: [], correspondents: [] } },
+    paperless,
+    actual,
+    parse: () => GOOD_PARSE,
+  });
+
+  const res = await bridge.import();
+
+  assert.equal(res.results[0].status, 'imported');
+  assert.equal(actual.imports[0].accountId, 'acct-cash');
+});
+
+test('AC8: matched entry without an account field lands in the default account', async () => {
+  const candidate = doc(1, { tags: [10] });
+  const paperless = makePaperless({ candidates: [candidate], tagNames: { bill: 10 } });
+  const actual = makeActual({ added: ['txn-1'], accounts: ['Cash', 'Amex'] });
+  const bridge = createBridge({
+    config: {
+      ...CONFIG,
+      signals: { tags: [{ name: 'bill' }], documentTypes: [], correspondents: [] },
+    },
+    paperless,
+    actual,
+    parse: () => GOOD_PARSE,
+  });
+
+  const res = await bridge.import();
+
+  assert.equal(res.results[0].status, 'imported');
+  assert.equal(actual.imports[0].accountId, 'acct-cash');
+});
+
+test('AC9: unresolvable mapped account fails that doc only, batch continues', async () => {
+  const bad = doc(1, { tags: [10] });
+  const good = doc(2, { tags: [11] });
+  const paperless = makePaperless({ candidates: [bad, good], tagNames: { bill: 10, receipt: 11 } });
+  // 'Nope' is NOT in the account list, so resolveAccount throws.
+  const actual = makeActual({ added: ['txn-2'], accounts: ['Cash'] });
+  const bridge = createBridge({
+    config: {
+      ...CONFIG,
+      signals: {
+        tags: [{ name: 'bill', account: 'Nope' }, { name: 'receipt' }],
+        documentTypes: [],
+        correspondents: [],
+      },
+    },
+    paperless,
+    actual,
+    parse: () => GOOD_PARSE,
+  });
+
+  let res;
+  await assert.doesNotReject(async () => {
+    res = await bridge.import();
+  });
+
+  const statuses = res.results.map((r) => r.status);
+  assert.deepEqual(statuses, ['error', 'imported']);
+  const badPatched = paperless.writes.some(
+    (w) => w.id === 1 && w.changes.custom_fields.some((e) => e.field === 2 && e.value === 'error'),
+  );
+  assert.ok(badPatched, "failing doc gets status 'error'");
+  // The good doc still imported into the default account.
+  assert.equal(actual.imports.length, 1);
+  assert.equal(actual.imports[0].accountId, 'acct-cash');
+  assert.equal(actual.imports[0].txns[0].imported_id, 'paperless:2');
+});
+
+test('Stage2: document-type mapped account is used for a matching doc', async () => {
+  const candidate = doc(1, { document_type: 20 });
+  const paperless = makePaperless({ candidates: [candidate], docTypes: { statement: 20 } });
+  const actual = makeActual({ added: ['txn-1'], accounts: ['Cash', 'Bank'] });
+  const bridge = createBridge({
+    config: {
+      ...CONFIG,
+      signals: { tags: [], documentTypes: [{ name: 'statement', account: 'Bank' }], correspondents: [] },
+    },
+    paperless,
+    actual,
+    parse: () => GOOD_PARSE,
+  });
+
+  const res = await bridge.import();
+
+  assert.equal(res.results[0].status, 'imported');
+  assert.equal(actual.imports[0].accountId, 'acct-bank');
+});
+
+test('Stage2: precedence — a tag match beats a document-type match', async () => {
+  // The doc matches BOTH a mapped tag and a mapped document type; the tag
+  // entry wins (tags are checked first per the documented order).
+  const candidate = doc(1, { tags: [10], document_type: 20 });
+  const paperless = makePaperless({
+    candidates: [candidate],
+    tagNames: { bill: 10 },
+    docTypes: { statement: 20 },
+  });
+  const actual = makeActual({ added: ['txn-1'], accounts: ['Cash', 'Amex', 'Bank'] });
+  const bridge = createBridge({
+    config: {
+      ...CONFIG,
+      signals: {
+        tags: [{ name: 'bill', account: 'Amex' }],
+        documentTypes: [{ name: 'statement', account: 'Bank' }],
+        correspondents: [],
+      },
+    },
+    paperless,
+    actual,
+    parse: () => GOOD_PARSE,
+  });
+
+  await bridge.import();
+
+  assert.equal(actual.imports[0].accountId, 'acct-amex');
+});
+
+test('Stage2: precedence — within a kind, first match in config order wins', async () => {
+  // The doc carries both tags; 'receipt' appears FIRST in config and has no
+  // account, so the import uses the default account despite 'bill'→Amex.
+  const candidate = doc(1, { tags: [10, 11] });
+  const paperless = makePaperless({ candidates: [candidate], tagNames: { bill: 10, receipt: 11 } });
+  const actual = makeActual({ added: ['txn-1'], accounts: ['Cash', 'Amex'] });
+  const bridge = createBridge({
+    config: {
+      ...CONFIG,
+      signals: { tags: [{ name: 'receipt' }, { name: 'bill', account: 'Amex' }], documentTypes: [], correspondents: [] },
+    },
+    paperless,
+    actual,
+    parse: () => GOOD_PARSE,
+  });
+
+  await bridge.import();
+
+  assert.equal(actual.imports[0].accountId, 'acct-cash');
+});
+
+test('Stage2: resolveSignalIds extracts names from object entries for candidate listing', async () => {
+  const candidate = doc(42);
+  const paperless = makePaperless({
+    candidates: [candidate],
+    tagNames: { invoice: 10 },
+    docTypes: { statement: 20 },
+    correspondents: { 'ACME Ltd': 30 },
+  });
+  const bridge = createBridge({
+    config: {
+      ...CONFIG,
+      signals: {
+        tags: [{ name: 'invoice' }],
+        documentTypes: [{ name: 'statement', account: 'Bank' }],
+        correspondents: ['ACME Ltd'],
+      },
+    },
+    paperless,
+    actual: makeActual({}),
+    parse: () => GOOD_PARSE,
+  });
+
+  await bridge.dryRun();
+
+  assert.equal(paperless.candidateCalls.length, 1);
+  // The OR-filter receives flat id lists — the mapped account does not
+  // influence candidate matching.
+  assert.deepEqual(paperless.candidateCalls[0].signals, {
+    tagIds: [10],
+    documentTypeIds: [20],
+    correspondentIds: [30],
+  });
+  assert.equal(paperless.writes.length, 0);
+});
+
+// --- Stage 3: income-by-document-type ----------------------------------------
+
+/** Parses with the real parseDoc's ctx (captured), returning the ctx. */
+function bridgeParseCtxVia({ config, paperless, actual }) {
+  let seenCtx = null;
+  const bridge = createBridge({
+    config,
+    paperless,
+    actual,
+    parse: (d, ctx) => {
+      seenCtx = ctx;
+      return GOOD_PARSE;
+    },
+  });
+  return {
+    bridge,
+    ctx: () => seenCtx,
+  };
+}
+
+test('Stage3: buildParseCtx passes resolved income ids from its own config section', async () => {
+  const candidate = doc(42, { document_type: 20, tags: [50] });
+  const paperless = makePaperless({
+    candidates: [candidate],
+    tagNames: { invoice: 10, dividend: 50 },
+    docTypes: { statement: 20 },
+  });
+  const harness = bridgeParseCtxVia({
+    config: { ...CONFIG, incomeSignals: { documentTypes: ['statement'], tags: ['dividend'] } },
+    paperless,
+    actual: makeActual({}),
+  });
+
+  await harness.bridge.dryRun();
+
+  const ctx = harness.ctx();
+  assert.ok(ctx != null, 'parse received a context');
+  // Names from the incomeSignals section are preserved...
+  assert.deepEqual(ctx.incomeSignals.documentTypes, ['statement']);
+  assert.deepEqual(ctx.incomeSignals.tags, ['dividend']);
+  // ...and names resolve to numeric Paperless ids for real-doc matching.
+  assert.deepEqual(ctx.incomeSignals.documentTypeIds, [20]);
+  assert.deepEqual(ctx.incomeSignals.tagIds, [50]);
+});
+
+test('Stage3: unresolved income names are logged + skipped, never fatal', async () => {
+  const candidate = doc(42);
+  const paperless = makePaperless({
+    candidates: [candidate],
+    tagNames: { invoice: 10 }, // watch signal resolves; income names do not exist
+  });
+  const warns = [];
+  const origWarn = console.warn;
+  console.warn = (m) => warns.push(String(m));
+  let seenCtx = null;
+  try {
+    const bridge = createBridge({
+      config: {
+        ...CONFIG,
+        incomeSignals: { documentTypes: ['ghost-type'], tags: ['ghost-tag'] },
+      },
+      paperless,
+      actual: makeActual({}),
+      parse: (d, ctx) => {
+        seenCtx = ctx;
+        return GOOD_PARSE;
+      },
+    });
+    await bridge.dryRun();
+  } finally {
+    console.warn = origWarn;
+  }
+
+  assert.ok(seenCtx != null);
+  assert.deepEqual(seenCtx.incomeSignals.documentTypeIds, []);
+  assert.deepEqual(seenCtx.incomeSignals.tagIds, []);
+  assert.equal(warns.length, 2, 'one warning per unresolved income name');
+  assert.ok(warns.some((w) => w.includes('income tag "ghost-tag"')), 'warns about the tag');
+  assert.ok(warns.some((w) => w.includes('income document type "ghost-type"')), 'warns about the type');
+});
+
+test('Stage3: watch signals never leak into incomeSignals (AC13 guard)', async () => {
+  // CONFIG has watch signals tags ['invoice'] resolving to id 10, but NO
+  // incomeSignals section — the parse ctx must carry no income signal names
+  // or ids, so the watch-signal match cannot flip the doc to income.
+  const candidate = doc(42, { tags: [10] });
+  const paperless = makePaperless({
+    candidates: [candidate],
+    tagNames: { invoice: 10 },
+  });
+  const harness = bridgeParseCtxVia({
+    config: { ...CONFIG },
+    paperless,
+    actual: makeActual({}),
+  });
+
+  await harness.bridge.dryRun();
+
+  const ctx = harness.ctx();
+  assert.ok(ctx != null, 'parse received a context');
+  assert.deepEqual(ctx.incomeSignals.documentTypeIds, []);
+  assert.deepEqual(ctx.incomeSignals.tagIds, []);
+  assert.deepEqual(ctx.incomeSignals.documentTypes, []);
+  assert.deepEqual(ctx.incomeSignals.tags, []);
+});
+
+test('Stage3: import passes resolved income ids too; income lookups stay read-only', async () => {
+  const candidate = doc(7, { tags: [50] });
+  const paperless = makePaperless({
+    candidates: [candidate],
+    tagNames: { invoice: 10, dividend: 50 },
+  });
+  let seenCtx = null;
+  const bridge = createBridge({
+    config: { ...CONFIG, incomeSignals: { documentTypes: [], tags: ['dividend'] } },
+    paperless,
+    actual: makeActual({ added: ['txn-7'] }),
+    parse: (d, ctx) => {
+      seenCtx = ctx;
+      return GOOD_PARSE;
+    },
+  });
+
+  const res = await bridge.import();
+
+  assert.equal(res.results[0].status, 'imported');
+  assert.deepEqual(seenCtx.incomeSignals.tagIds, [50]);
+  assert.deepEqual(seenCtx.incomeSignals.documentTypeIds, []);
+  // Only the watch signal tag is ensured; the income tag resolved read-only.
+  assert.equal(paperless.ensureCalls(), 1, 'income tag is resolved via tagIdByName, never ensured');
 });

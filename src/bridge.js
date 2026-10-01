@@ -10,6 +10,8 @@
 import { createPaperlessClient } from './paperless.js';
 import { connect, resolveAccount, importTxns } from './actual.js';
 import { parseDoc } from './parse.js';
+import { signalEntryName, signalEntryAccount } from './config.js';
+import { resolveSignalIdsReadOnly } from './signalIds.js';
 
 export const NEEDS_REVIEW_TAG = 'needs-review';
 export const DEFAULT_POLL_INTERVAL_MS = 60_000;
@@ -32,7 +34,7 @@ export function createBridge({ config, paperless, actual, parse = parseDoc } = {
   let paperlessClient = paperless ?? null;
   let actualHandle = actual ?? null;
   let actualPromise = null;
-  let accountIdPromise = null;
+  const accountIdPromises = new Map();
   let customFieldsPromise = null;
   let needsReviewTagIdPromise = null;
   let ensureNeedsReviewTagCount = 0;
@@ -70,14 +72,20 @@ export function createBridge({ config, paperless, actual, parse = parseDoc } = {
     return customFieldsPromise;
   }
 
-  /** Resolved Actual account id for config.actual.defaultAccountName (cached). */
-  function getAccountId() {
-    if (!accountIdPromise) {
-      accountIdPromise = getActual().then((api) =>
-        resolveAccount(api, config.actual?.defaultAccountName),
+  /**
+   * Resolved Actual account id for a name (cached per unique account name).
+   * `name` defaults to config.actual.defaultAccountName when falsy; mapped
+   * signal accounts pass their own name.
+   */
+  function getAccountId(name) {
+    const accountName = name || config.actual?.defaultAccountName;
+    if (!accountIdPromises.has(accountName)) {
+      accountIdPromises.set(
+        accountName,
+        getActual().then((api) => resolveAccount(api, accountName)),
       );
     }
-    return accountIdPromise;
+    return accountIdPromises.get(accountName);
   }
 
   function getNeedsReviewTagId() {
@@ -110,59 +118,133 @@ export function createBridge({ config, paperless, actual, parse = parseDoc } = {
   /**
    * Resolves configured signal names to Paperless ids.
    *
-   * Tags: name → id via tagIdByName (read-only) or ensureTag (creates missing
-   * tags) — `create` is only true for import, never dry-run, so dry-run cannot
-   * write. Document types/correspondents resolve via read-only list lookups.
+   * Entries may be plain strings or `{name, account}` objects (name
+   * extraction via signalEntryName). With `create:false` (dry-run/report)
+   * this delegates entirely to the shared read-only resolver
+   * (resolveSignalIdsReadOnly), keeping bridge and report in lockstep. With
+   * `create:true` (import) tags resolve via ensureTag (creating missing
+   * tags) instead of tagIdByName, and the document-type/correspondent
+   * lookups stay read-only exactly as the shared resolver does.
    * Unresolvable signal names are logged and skipped (never fatal).
+   *
+   * Returns `{signals: {tagIds, documentTypeIds, correspondentIds}}` — the
+   * flat id lists listCandidateDocs' OR-filter consumes — plus `matches`, per
+   * kind in config order, the resolved `{entry, id}` pairs so per-doc account
+   * mapping can find which entry matched a document.
    */
   async function resolveSignalIds({ create = false } = {}) {
     const pl = getPaperless();
+    if (!create) return resolveSignalIdsReadOnly({ paperless: pl, signals });
+
+    // create:true (import): identical resolution except missing tags are
+    // CREATED (ensureTag) instead of skipped. The document-type and
+    // correspondent lookups mirror resolveSignalIdsReadOnly; only the tag
+    // leg differs, so keep the two in sync when one changes.
     const listedTags = Array.isArray(signals.tags) ? signals.tags : [];
     const listedDocumentTypes = Array.isArray(signals.documentTypes) ? signals.documentTypes : [];
     const listedCorrespondents = Array.isArray(signals.correspondents) ? signals.correspondents : [];
 
     const tagIds = [];
-    for (const name of listedTags) {
+    const tags = [];
+    for (const entry of listedTags) {
+      const name = signalEntryName(entry);
       const id = create ? await pl.ensureTag(name) : await pl.tagIdByName(name);
+      if (id != null) {
+        tagIds.push(id);
+        tags.push({ entry, id });
+      } else console.warn(`ab2pb: signal tag "${name}" does not exist in Paperless; skipping`);
+    }
+
+    const documentTypeIds = [];
+    const documentTypes = [];
+    const docTypes = await pl.listDocumentTypes();
+    for (const entry of listedDocumentTypes) {
+      const name = signalEntryName(entry);
+      const id = docTypes.get(name);
+      if (id != null) {
+        documentTypeIds.push(id);
+        documentTypes.push({ entry, id });
+      } else console.warn(`ab2pb: signal document type "${name}" does not exist; skipping`);
+    }
+
+    const correspondentIds = [];
+    const correspondents = [];
+    const correspondentMap = await pl.listCorrespondents();
+    for (const entry of listedCorrespondents) {
+      const name = signalEntryName(entry);
+      const id = correspondentMap.get(name);
+      if (id != null) {
+        correspondentIds.push(id);
+        correspondents.push({ entry, id });
+      } else console.warn(`ab2pb: signal correspondent "${name}" does not exist; skipping`);
+    }
+
+    return {
+      signals: { tagIds, documentTypeIds, correspondentIds },
+      matches: { tags, documentTypes, correspondents },
+    };
+  }
+
+  /**
+   * The configured income signal names (from the incomeSignals section only),
+   * as `{documentTypes, tags}` name arrays (defaulting to []).
+   */
+  function loadIncomeSignals() {
+    const income = config.incomeSignals ?? {};
+    return {
+      documentTypes: Array.isArray(income.documentTypes) ? income.documentTypes : [],
+      tags: Array.isArray(income.tags) ? income.tags : [],
+    };
+  }
+
+  /**
+   * Resolves income signal NAMES to Paperless ids via read-only lookups
+   * (tagIdByName / listDocumentTypes — never ensureTag, so even `import`
+   * cannot create income tags). Unresolvable names are logged and skipped,
+   * never fatal. Returns `{documentTypeIds, tagIds}`.
+   */
+  async function resolveIncomeSignalIds() {
+    const income = loadIncomeSignals();
+    if (income.tags.length === 0 && income.documentTypes.length === 0) {
+      return { documentTypeIds: [], tagIds: [] };
+    }
+    const pl = getPaperless();
+
+    const tagIds = [];
+    for (const name of income.tags) {
+      const id = await pl.tagIdByName(name);
       if (id != null) tagIds.push(id);
-      else console.warn(`ab2pb: signal tag "${name}" does not exist in Paperless; skipping`);
+      else console.warn(`ab2pb: income tag "${name}" does not exist in Paperless; skipping`);
     }
 
     const documentTypeIds = [];
     const docTypes = await pl.listDocumentTypes();
-    for (const name of listedDocumentTypes) {
+    for (const name of income.documentTypes) {
       const id = docTypes.get(name);
       if (id != null) documentTypeIds.push(id);
-      else console.warn(`ab2pb: signal document type "${name}" does not exist; skipping`);
+      else console.warn(`ab2pb: income document type "${name}" does not exist; skipping`);
     }
 
-    const correspondentIds = [];
-    const correspondents = await pl.listCorrespondents();
-    for (const name of listedCorrespondents) {
-      const id = correspondents.get(name);
-      if (id != null) correspondentIds.push(id);
-      else console.warn(`ab2pb: signal correspondent "${name}" does not exist; skipping`);
-    }
-
-    return { tagIds, documentTypeIds, correspondentIds };
+    return { documentTypeIds, tagIds };
   }
 
   /**
    * Builds the parseDoc context from config.
    *
-   * incomeSignals carry only the configured signal NAMES (never the resolved
-   * ids): real Paperless documents carry numeric tag/document_type ids, so the
-   * names are inert in production and income is decided by refund/credit-note
-   * keywords — passing resolved ids here would make every watch-signal match
-   * (e.g. tag "invoice") flip an expense to income, which is wrong. String-keyed
-   * test documents keep the name-based matching from the parse tests.
+   * incomeSignals come ONLY from the distinct top-level `incomeSignals` config
+   * section (never the watch `signals` list — a watch-signal match must not
+   * flip a document to income). Both the configured NAMES (kept for
+   * string-keyed matching) and the RESOLVED numeric Paperless ids (matching
+   * real documents' numeric tag/document_type fields) are passed to parse.
    */
-  function buildParseCtx(customFieldIds) {
+  async function buildParseCtx(customFieldIds) {
     const fieldIds = {};
     for (const role of ['amount', 'date', 'payee']) {
       const name = fields[role];
       if (name != null && customFieldIds.has(name)) fieldIds[name] = customFieldIds.get(name);
     }
+    const incomeNames = loadIncomeSignals();
+    const incomeIds = await resolveIncomeSignalIds();
     return {
       currency: config.locale?.currency ?? 'AUD',
       timezone: config.locale?.timezone ?? 'Australia/Sydney',
@@ -172,8 +254,10 @@ export function createBridge({ config, paperless, actual, parse = parseDoc } = {
       fields: { amount: fields.amount, date: fields.date, payee: fields.payee },
       fieldIds,
       incomeSignals: {
-        documentTypes: Array.isArray(signals.documentTypes) ? signals.documentTypes : [],
-        tags: Array.isArray(signals.tags) ? signals.tags : [],
+        documentTypes: incomeNames.documentTypes,
+        tags: incomeNames.tags,
+        documentTypeIds: incomeIds.documentTypeIds,
+        tagIds: incomeIds.tagIds,
       },
     };
   }
@@ -284,13 +368,53 @@ export function createBridge({ config, paperless, actual, parse = parseDoc } = {
   }
 
   /**
+   * Finds the first signal entry that matches the document: tags, then
+   * document types, then correspondents — within each kind, config order wins
+   * (Open Question 1 of the Tier A plan). Returns the `{entry, id}` match or
+   * undefined. Matching runs on resolved Paperless ids; the mapped account on
+   * the entry never influences which signals match, only where the import
+   * lands.
+   */
+  function findSignalMatch(doc, signalMatches) {
+    const docTags = new Set(Array.isArray(doc.tags) ? doc.tags : []);
+    for (const m of signalMatches.tags) {
+      if (docTags.has(m.id)) return m;
+    }
+    if (doc.document_type != null) {
+      for (const m of signalMatches.documentTypes) {
+        if (doc.document_type === m.id) return m;
+      }
+    }
+    if (doc.correspondent != null) {
+      for (const m of signalMatches.correspondents) {
+        if (doc.correspondent === m.id) return m;
+      }
+    }
+    return undefined;
+  }
+
+  const NO_MATCHES = { tags: [], documentTypes: [], correspondents: [] };
+
+  /**
+   * Account for a doc's import: the first matching signal entry's mapped
+   * account when the entry carries one, else the default account (per-name
+   * cached). An unresolvable mapped account rejects here — callers isolate
+   * that failure per doc.
+   */
+  async function accountIdForDoc(doc, signalMatches) {
+    const match = findSignalMatch(doc, signalMatches ?? NO_MATCHES);
+    const mapped = match != null ? signalEntryAccount(match.entry) : undefined;
+    return getAccountId(mapped);
+  }
+
+  /**
    * Imports a single candidate document:
    *   1. skip when actual_transaction_id is already set (idempotency).
    *   2-3. parse; anything not cleanly parseable → needs-review, never imported.
    *   4. else write parsed fields, import with imported_id `paperless:<id>`,
    *      write back the Actual transaction id + status 'imported'.
    */
-  async function processDoc(doc, { customFieldIds, parseCtx }) {
+  async function processDoc(doc, { customFieldIds, parseCtx, signalMatches }) {
     const importedFieldId = fieldId(customFieldIds, 'imported');
 
     if (importedFieldId != null && hasCustomFieldValue(doc, importedFieldId)) {
@@ -315,7 +439,7 @@ export function createBridge({ config, paperless, actual, parse = parseDoc } = {
       imported_id: `paperless:${doc.id}`,
     };
     const api = await getActual();
-    const accountId = await getAccountId();
+    const accountId = await accountIdForDoc(doc, signalMatches);
     const result = await importTxns(api, accountId, [txn], { dryRun: false });
     const txnId = result?.added?.[0] ?? result?.updated?.[0];
     if (txnId == null) {
@@ -364,13 +488,13 @@ export function createBridge({ config, paperless, actual, parse = parseDoc } = {
   async function dryRun() {
     const pl = getPaperless();
     const customFieldIds = await getCustomFieldIds();
-    const signalIds = await resolveSignalIds({ create: false });
+    const resolved = await resolveSignalIds({ create: false });
     const candidates = await pl.listCandidateDocs({
       importedFieldName: fields.imported,
-      signals: signalIds,
+      signals: resolved.signals,
       customFieldIds,
     });
-    const parseCtx = buildParseCtx(customFieldIds);
+    const parseCtx = await buildParseCtx(customFieldIds);
 
     const planned = [];
     for (const doc of candidates) {
@@ -401,18 +525,24 @@ export function createBridge({ config, paperless, actual, parse = parseDoc } = {
     const customFieldIds = await getCustomFieldIds();
     requireFieldIds(customFieldIds, IMPORT_REQUIRED_FIELD_ROLES, 'import');
 
-    const signalIds = await resolveSignalIds({ create: true });
+    const resolved = await resolveSignalIds({ create: true });
     const candidates = await pl.listCandidateDocs({
       importedFieldName: fields.imported,
-      signals: signalIds,
+      signals: resolved.signals,
       customFieldIds,
     });
-    const parseCtx = buildParseCtx(customFieldIds);
+    const parseCtx = await buildParseCtx(customFieldIds);
 
     const results = [];
     for (const doc of candidates) {
       try {
-        results.push(await processDoc(doc, { customFieldIds, parseCtx }));
+        results.push(
+          await processDoc(doc, {
+            customFieldIds,
+            parseCtx,
+            signalMatches: resolved.matches,
+          }),
+        );
       } catch (err) {
         console.error(`ab2pb: paperless doc ${doc.id}: ${err.message ?? err}`);
         try {
