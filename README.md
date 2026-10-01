@@ -46,6 +46,9 @@ documentation.
 - [x] **Income-by-document-type** — an optional, distinct `incomeSignals` config section
       (document types + tags) whose documents parse as income (positive amounts), separate from
       the watch `signals` list.
+- [x] **Duplicate-guard** — an optional (`duplicateGuard.enabled`, default off) pre-import check
+      that flags documents which already have a matching Actual transaction as
+      `possible-duplicate` instead of importing a second copy.
 
 ## Prerequisites
 
@@ -67,14 +70,17 @@ documentation.
    | `actual_payee`        | Text      | Parsed payee / correspondent                   |
    | `actual_currency`     | Text      | Currency code (`AUD`, or the foreign code)     |
    | `actual_transaction_id` | URL or Text | Actual transaction id written back on import |
-   | `actual_status`       | Select    | Options: `pending`, `imported`, `error`, `needs-review` |
+   | `actual_status`       | Select    | Options: `pending`, `imported`, `error`, `needs-review`, `possible-duplicate` |
 
    `actual_status` is the pipeline state the bridge updates: docs that fail parsing are marked
-   `needs-review`, docs whose import errors get `error`, successful imports get `imported`
-   (start everything at `pending`).
+   `needs-review`, docs whose import errors get `error`, successful imports get `imported`,
+   and (when the duplicate-guard is enabled) docs matching an existing transaction get
+   `possible-duplicate` (start everything at `pending`).
 3. **Create the tags**:
    - `needs-review` — the bridge looks this up (and creates it if missing) to tag documents
      that need a human decision.
+   - `possible-duplicate` — the bridge looks this up (and creates it if missing) when the
+     [duplicate-guard](#duplicate-guard) flags a document instead of importing it.
    - `imported` — optional; convenient for filtering imported documents in the Paperless UI.
 4. **Ensure your signal tags/document types/correspondents exist.** By default the bridge only
    watches documents carrying one of the tags `invoice`, `receipt`, or `bill` (see
@@ -158,6 +164,37 @@ are optional and default to `[]`; entries are plain Paperless document-type/tag 
 created in Paperless beforehand — names that don't resolve are skipped with a warning, never
 fatal. Omitting the whole section means no income signals at all.
 
+### Duplicate-guard
+
+The optional top-level `duplicateGuard` section protects against re-importing documents whose
+`actual_transaction_id` provenance was lost (e.g. documents already imported before the bridge
+existed). It is **off by default** and must be enabled explicitly:
+
+```json
+"duplicateGuard": {
+  "enabled": true,
+  "windowDays": 7
+}
+```
+
+When `enabled` is `true`, a document that parses cleanly is checked against the Actual
+transactions already in its account *before* importing. The bridge fetches the account's
+transactions in a window of `windowDays` days before and after the parsed date (default `7`,
+so a 15-day span) and looks for an existing transaction with the **same amount** (to the cent),
+the **same date**, and a **similar payee** — a case-insensitive substring match in either
+direction (e.g. `ACME` matches `Acme Pty Ltd`). If one is found, the document is **not
+imported**: it is tagged `possible-duplicate`, the status custom field is set to
+`possible-duplicate`, and the parsed amount/date/payee/currency are written back for review. A
+transaction whose `imported_id` is `paperless:<thisDocId>` is the bridge's own import for the
+same document and is never treated as a duplicate.
+
+`possible-duplicate` is a **terminal** state: on later passes the bridge skips a document whose
+status is already `possible-duplicate` (like it skips a document that already has an
+`actual_transaction_id`), so a flagged document is not re-examined on every poll. A failure
+while checking one document marks just that document `error` and the rest of the batch
+continues. Leave `duplicateGuard` out of the config (or set `enabled: false`) to keep the
+v1 behaviour: every cleanly parsed document is imported.
+
 ## 4. Docker Compose wiring
 
 `docker-compose.yml` is included. The bridge must join the same Docker network as your
@@ -229,6 +266,11 @@ missing field), when Paperless/Actual are unreachable, or when a whole pass fail
 - **Foreign currency & needs-review** — bare `$` is ambiguous and non-AUD codes (e.g.
   `USD $10.00`) are flagged foreign; foreign, unparseable, or low-confidence documents are
   **never imported** — they are tagged `needs-review` with status set so a human can decide.
+- **Duplicate-guard (opt-in)** — when `duplicateGuard.enabled` is true, a cleanly parsed
+  document is compared against existing Actual transactions (same account, ±`windowDays` around
+  the parsed date) for a matching amount + date + similar payee. A match is tagged
+  `possible-duplicate` (status `possible-duplicate`) and never imported; the status is terminal
+  so the document is skipped on subsequent passes.
 - **Sign handling** — expenses are negative (minor units, so `$50.00` → `-5000`); documents
   matching `incomeSignals` (document types/tags) or containing refund/credit-note/cashback
   keywords parse positive (income).
