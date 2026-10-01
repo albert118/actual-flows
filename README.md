@@ -35,13 +35,17 @@ Data flow per pass:
 clients, AU/foreign-currency parser, import orchestration with idempotency, CLI, Docker wiring,
 documentation.
 
-**v2 TODO:**
+**v2 in progress:**
 
-- [ ] **Reconcile report** — `--reconcile` currently routes to a stub (see
-      [CLI reference](#cli-reference)); the real report will compare Actual transactions
-      against their Paperless source documents and flag mismatches.
-- [ ] **Per-signal account mapping** — map individual signal tags/document types/correspondents
+- [x] **Reconcile report** — `--reconcile [year]` (read-only) classifies the reconcile window
+      (current + previous AU financial year, or the single FY ending in `year`) into signal
+      docs without a transaction, dangling `paperless:<id>` transactions, and non-paperless
+      transactions (see [CLI reference](#cli-reference)).
+- [x] **Per-signal account mapping** — map individual signal tags/document types/correspondents
       to distinct Actual accounts instead of one `defaultAccountName`.
+- [x] **Income-by-document-type** — an optional, distinct `incomeSignals` config section
+      (document types + tags) whose documents parse as income (positive amounts), separate from
+      the watch `signals` list.
 
 ## Prerequisites
 
@@ -84,7 +88,8 @@ documentation.
 2. **Password** — the Actual server password (the bridge needs it to download the budget).
 3. **Budget Sync ID** — open Actual → **Settings → Advanced → Show advanced settings → Sync ID**.
 4. **Default account name** — the name of the account transactions should land in (e.g.
-   `Cash`), matching `config.actual.defaultAccountName`.
+   `Cash`), matching `config.actual.defaultAccountName`. Signal entries with a mapped
+   `account` (see [Configuration](#3-configuration)) override this per document.
 
 ## 3. Configuration
 
@@ -105,6 +110,53 @@ ACTUAL_SYNC_ID=<your budget sync id>
 The config file may keep the `"${PAPERLESS_TOKEN}"`-style placeholders; the bridge only
 requires the values to be resolvable, either inline or via the environment. You can also point
 the bridge at a different config file with `AB2PB_CONFIG=./config.json`.
+
+### Mapping signals to Actual accounts
+
+Each entry in `signals.tags`, `signals.documentTypes`, and `signals.correspondents` is either a
+plain signal name (imports into `actual.defaultAccountName`) or an object with an optional
+`account`:
+
+```json
+"signals": {
+  "tags": [
+    "invoice",
+    { "name": "bill", "account": "Amex" },
+    { "name": "receipt" }
+  ],
+  "documentTypes": [{ "name": "statement", "account": "Bank" }],
+  "correspondents": []
+}
+```
+
+A document matching a signal entry with an `account` imports into that Actual account; matches
+against plain names, or object entries without an `account`, use the default account. When a
+document matches several signals, the **first matching entry wins**: tags are checked first,
+then document types, then correspondents, and within each kind config order decides. The mapped
+account only affects where the transaction lands — candidate filtering still treats every entry
+as one OR-filter over signal names, regardless of account. If a mapped account does not exist
+in Actual, that document is marked `error` and the rest of the batch continues.
+
+### Income signals (positive amounts)
+
+Documents parse as **expenses** (negative amounts) by default. The optional top-level
+`incomeSignals` section marks document types and tags whose documents should parse as
+**income** (positive) — e.g. dividends, credit notes, rebates:
+
+```json
+"incomeSignals": {
+  "documentTypes": ["credit note"],
+  "tags": ["dividend"]
+}
+```
+
+`incomeSignals` is its own section, deliberately **distinct from `signals`**: the watch
+`signals` only decide which documents are import candidates, and a watch-signal match alone
+never flips a document to income. Income comes only from an entry here (resolved to its
+Paperless id) or a `refund` / `credit note` / `cashback` keyword in the OCR content. Both keys
+are optional and default to `[]`; entries are plain Paperless document-type/tag **names**,
+created in Paperless beforehand — names that don't resolve are skipped with a warning, never
+fatal. Omitting the whole section means no income signals at all.
 
 ## 4. Docker Compose wiring
 
@@ -157,7 +209,7 @@ Run the bridge locally with `node src/cli.js <flags>` (or `ab2pb` once installed
 | `--import`     | Run a single import pass (parse → write back → import → mark imported).   | `0` ok, `1` on failure |
 | `--once`       | Single poll-style import pass, then exit (same as `--import`).            | `0` ok, `1` on failure |
 | `--poll [s]`   | Watch Paperless continuously; per-pass failures are logged, not fatal. Interval in seconds (default `60`). | runs until interrupted (`SIGINT`); `1` if the process fails to start |
-| `--reconcile`  | Reconcile report — **v2, not yet implemented** (routes to a stub that logs and exits). | `0` |
+| `--reconcile [year]` | Read-only reconcile report: signal docs without a transaction, dangling `paperless:<id>` transactions, and non-paperless transactions for the window (current + previous AU FY, or the single FY ending `year`). | `0` ok, `1` on failure |
 | *(no flag / unknown flag)* | Print usage.                                                        | `0` |
 
 Exit code `1` is also used when the config is missing/invalid (the error names the exact
@@ -177,8 +229,9 @@ missing field), when Paperless/Actual are unreachable, or when a whole pass fail
 - **Foreign currency & needs-review** — bare `$` is ambiguous and non-AUD codes (e.g.
   `USD $10.00`) are flagged foreign; foreign, unparseable, or low-confidence documents are
   **never imported** — they are tagged `needs-review` with status set so a human can decide.
-- **Sign handling** — expenses are negative (minor units, so `$50.00` → `-5000`); refunds and
-  credit notes parse positive (income).
+- **Sign handling** — expenses are negative (minor units, so `$50.00` → `-5000`); documents
+  matching `incomeSignals` (document types/tags) or containing refund/credit-note/cashback
+  keywords parse positive (income).
 - **Write-backs** — on success the doc gets `actual_transaction_id` (from Actual's returned
   id), status `imported`, and the parsed amount/date/payee/currency; failed docs get status
   `error`, and one bad document never aborts the rest of the batch.
