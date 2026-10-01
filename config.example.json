@@ -32,6 +32,10 @@
     "documentTypes": [],
     "tags": ["dividend"]
   },
+  "duplicateGuard": {
+    "enabled": false,
+    "windowDays": 7
+  },
   "locale": {
     "currency": "AUD",
     "timezone": "Australia/Sydney",
