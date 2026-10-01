@@ -8,13 +8,90 @@
 // `parse` defaults to the real parseDoc.
 
 import { createPaperlessClient } from './paperless.js';
-import { connect, resolveAccount, importTxns } from './actual.js';
+import { connect, resolveAccount, importTxns, getTransactions } from './actual.js';
 import { parseDoc } from './parse.js';
-import { signalEntryName, signalEntryAccount } from './config.js';
+import { signalEntryName, signalEntryAccount, DEFAULT_DUPLICATE_WINDOW_DAYS } from './config.js';
 import { resolveSignalIdsReadOnly } from './signalIds.js';
 
 export const NEEDS_REVIEW_TAG = 'needs-review';
+export const POSSIBLE_DUPLICATE_TAG = 'possible-duplicate';
 export const DEFAULT_POLL_INTERVAL_MS = 60_000;
+
+/**
+ * Memoised {get, ensure} for one Paperless tag name, backed by the bridge's
+ * paperless accessor.
+ *
+ * get() maps the name to its tag id (read-only, cached). ensure() creates the
+ * tag when it does not exist yet — a single paranoia re-check tolerates a
+ * stale cached miss while the tag was created mid-session, and the tag is
+ * only ever ensured once per bridge instance (per session).
+ */
+function makeTagEnsurer(getPaperlessFn, tagName) {
+  let idPromise = null;
+  let ensureCount = 0;
+  const get = () => {
+    if (!idPromise) idPromise = getPaperlessFn().tagIdByName(tagName);
+    return idPromise;
+  };
+  const ensure = async () => {
+    let tagId = await get();
+    if (tagId == null && ensureCount === 0) {
+      tagId = await getPaperlessFn().ensureTag(tagName);
+      ensureCount += 1;
+      idPromise = Promise.resolve(tagId);
+    }
+    return tagId ?? null;
+  };
+  return { get, ensure };
+}
+
+/** @returns {string} the ISO date (YYYY-MM-DD) of `date` plus offsetDays. */
+function isoDateOffset(isoDate, offsetDays) {
+  const [y, m, d] = String(isoDate).split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d + offsetDays)).toISOString().slice(0, 10);
+}
+
+/**
+ * Duplicate-guard fetch window around a parsed date: `windowDays` days before
+ * AND after (both inclusive), so the span is 2*windowDays + 1 days.
+ */
+function duplicateWindow(isoDate, windowDays) {
+  return { start: isoDateOffset(isoDate, -windowDays), end: isoDateOffset(isoDate, windowDays) };
+}
+
+/**
+ * Payee-similarity rule for the duplicate-guard: case-insensitive substring
+ * overlap in either direction, after trimming. Empty/missing names never
+ * match (a doc with no payee cannot be judged a duplicate on payee).
+ */
+function payeesSimilar(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const na = a.trim().toLowerCase();
+  const nb = b.trim().toLowerCase();
+  if (!na || !nb) return false;
+  return na.includes(nb) || nb.includes(na);
+}
+
+/**
+ * Returns the first existing Actual transaction that looks like a duplicate
+ * of the parsed doc: SAME amount (integer minor units) AND SAME date AND a
+ * SIMILAR payee. A transaction whose `imported_id` is `paperless:<docId>` is
+ * the bridge's own import for THIS doc and never counts as a duplicate.
+ * Returns undefined when nothing matches.
+ */
+function findDuplicateCandidate(txns, parsed, docId) {
+  const ownImportedId = `paperless:${docId}`;
+  for (const txn of txns ?? []) {
+    if (txn == null) continue;
+    if (txn.imported_id === ownImportedId) continue;
+    if (txn.amount !== parsed.amount) continue;
+    if (txn.date !== parsed.date) continue;
+    const txnPayee = txn.payee_name ?? txn.imported_payee ?? null;
+    if (!payeesSimilar(txnPayee, parsed.payee)) continue;
+    return txn;
+  }
+  return undefined;
+}
 
 // The six field names config.paperless.fields is expected to carry. check()
 // verifies all of them exist in Paperless; import() hard-requires the
@@ -31,13 +108,25 @@ export function createBridge({ config, paperless, actual, parse = parseDoc } = {
   const fields = config.paperless?.fields ?? {};
   const signals = config.signals ?? {};
 
+  // duplicate-guard (Tier A item 4): optional, defaults off (v1-compatible).
+  // windowDays falls back to the shared default when absent or unusable
+  // (loadConfig validates; this defensive fallback covers injected configs).
+  const duplicateGuard = config.duplicateGuard ?? {};
+  const duplicateGuardEnabled = duplicateGuard.enabled === true;
+  const duplicateWindowDays =
+    Number.isInteger(duplicateGuard.windowDays) && duplicateGuard.windowDays > 0
+      ? duplicateGuard.windowDays
+      : DEFAULT_DUPLICATE_WINDOW_DAYS;
+
   let paperlessClient = paperless ?? null;
   let actualHandle = actual ?? null;
   let actualPromise = null;
   const accountIdPromises = new Map();
   let customFieldsPromise = null;
-  let needsReviewTagIdPromise = null;
-  let ensureNeedsReviewTagCount = 0;
+  const tagEnsurers = {
+    [NEEDS_REVIEW_TAG]: makeTagEnsurer(getPaperless, NEEDS_REVIEW_TAG),
+    [POSSIBLE_DUPLICATE_TAG]: makeTagEnsurer(getPaperless, POSSIBLE_DUPLICATE_TAG),
+  };
 
   function getPaperless() {
     if (paperlessClient) return paperlessClient;
@@ -86,13 +175,6 @@ export function createBridge({ config, paperless, actual, parse = parseDoc } = {
       );
     }
     return accountIdPromises.get(accountName);
-  }
-
-  function getNeedsReviewTagId() {
-    if (!needsReviewTagIdPromise) {
-      needsReviewTagIdPromise = getPaperless().tagIdByName(NEEDS_REVIEW_TAG);
-    }
-    return needsReviewTagIdPromise;
   }
 
   function fieldId(map, role) {
@@ -262,15 +344,18 @@ export function createBridge({ config, paperless, actual, parse = parseDoc } = {
     };
   }
 
-  /** True when doc.custom_fields carries a non-empty value for the field id. */
-  function hasCustomFieldValue(doc, id) {
+  /** True when doc.custom_fields carries a value for the field id. When
+   * `expected` is given, only that exact value counts (non-empty check
+   * otherwise). */
+  function hasCustomFieldValue(doc, id, expected) {
     if (id == null || !Array.isArray(doc.custom_fields)) return false;
     return doc.custom_fields.some(
       (entry) =>
         entry &&
         entry.field === id &&
         entry.value != null &&
-        entry.value !== '',
+        entry.value !== '' &&
+        (expected === undefined || entry.value === expected),
     );
   }
 
@@ -311,33 +396,38 @@ export function createBridge({ config, paperless, actual, parse = parseDoc } = {
     await getPaperless().updateDoc(doc.id, { custom_fields: entries });
   }
 
-  /** Ensures the needs-review tag exists (creating it once) and returns its id. */
-  async function ensureNeedsReviewTagId() {
-    let tagId = await getNeedsReviewTagId();
-    // Cached miss may be stale; a single paranoia re-check avoids racing the
-    // cache across poll passes after the tag was created mid-session.
-    if (tagId == null && ensureNeedsReviewTagCount === 0) {
-      tagId = await getPaperless().ensureTag(NEEDS_REVIEW_TAG);
-      ensureNeedsReviewTagCount += 1;
-      needsReviewTagIdPromise = Promise.resolve(tagId);
-    }
-    return tagId ?? null;
-  }
-
-  /** Tags a doc needs-review and sets its status field (never imports). */
-  async function markNeedsReview(doc, parsed, customFieldIds) {
+  /**
+   * Flags a doc with a tag + status after it must NOT be imported: writes
+   * parsed fields back, ensures the tag (creating it once), and sets the
+   * status custom field to `statusValue`. Never imports.
+   */
+  async function markFlagged(doc, parsed, customFieldIds, { tagEnsurer, statusValue }) {
     const entries = parsedFieldEntries(parsed, customFieldIds);
     const statusId = fieldId(customFieldIds, 'status');
-    if (statusId != null) entries.push({ field: statusId, value: 'needs-review' });
+    if (statusId != null) entries.push({ field: statusId, value: statusValue });
 
     const changes = { custom_fields: entries };
-    const tagId = await ensureNeedsReviewTagId();
+    const tagId = await tagEnsurer.ensure();
     const tags = Array.isArray(doc.tags) ? doc.tags.filter((t) => t != null) : [];
     if (tagId != null && !tags.includes(tagId)) tags.push(tagId);
     changes.tags = tags;
 
     await getPaperless().updateDoc(doc.id, changes);
   }
+
+  /** Tags a doc needs-review and sets its status field (never imports). */
+  const markNeedsReview = (doc, parsed, customFieldIds) =>
+    markFlagged(doc, parsed, customFieldIds, {
+      tagEnsurer: tagEnsurers[NEEDS_REVIEW_TAG],
+      statusValue: 'needs-review',
+    });
+
+  /** Tags a doc possible-duplicate, sets status, writes parsed fields (never imports). */
+  const markPossibleDuplicate = (doc, parsed, customFieldIds) =>
+    markFlagged(doc, parsed, customFieldIds, {
+      tagEnsurer: tagEnsurers[POSSIBLE_DUPLICATE_TAG],
+      statusValue: POSSIBLE_DUPLICATE_TAG,
+    });
 
   /** Records actual_transaction_id + status 'imported'; drops needs-review tag. */
   async function markImported(doc, txnId, customFieldIds) {
@@ -350,7 +440,7 @@ export function createBridge({ config, paperless, actual, parse = parseDoc } = {
     const changes = { custom_fields: entries };
 
     // Remove the needs-review tag when the doc carries it.
-    const needsReviewTagId = await getNeedsReviewTagId();
+    const needsReviewTagId = await tagEnsurers[NEEDS_REVIEW_TAG].get();
     if (needsReviewTagId != null && Array.isArray(doc.tags) && doc.tags.includes(needsReviewTagId)) {
       changes.tags = doc.tags.filter((t) => t !== needsReviewTagId);
     }
@@ -409,15 +499,24 @@ export function createBridge({ config, paperless, actual, parse = parseDoc } = {
 
   /**
    * Imports a single candidate document:
-   *   1. skip when actual_transaction_id is already set (idempotency).
+   *   1. skip when actual_transaction_id is already set (idempotency) — and
+   *      treat status `possible-duplicate` as equally terminal, so a
+   *      duplicate-flagged doc is not re-examined on every pass.
    *   2-3. parse; anything not cleanly parseable → needs-review, never imported.
-   *   4. else write parsed fields, import with imported_id `paperless:<id>`,
+   *   4. (duplicate-guard, opt-in) when enabled, an existing Actual txn with
+   *      the same amount + date + similar payee → possible-duplicate, never
+   *      imported.
+   *   5. else write parsed fields, import with imported_id `paperless:<id>`,
    *      write back the Actual transaction id + status 'imported'.
    */
   async function processDoc(doc, { customFieldIds, parseCtx, signalMatches }) {
     const importedFieldId = fieldId(customFieldIds, 'imported');
+    const statusId = fieldId(customFieldIds, 'status');
 
-    if (importedFieldId != null && hasCustomFieldValue(doc, importedFieldId)) {
+    if (
+      (importedFieldId != null && hasCustomFieldValue(doc, importedFieldId)) ||
+      (statusId != null && hasCustomFieldValue(doc, statusId, 'possible-duplicate'))
+    ) {
       return { docId: doc.id, status: 'skipped' };
     }
 
@@ -427,6 +526,32 @@ export function createBridge({ config, paperless, actual, parse = parseDoc } = {
     if (needsReview) {
       await markNeedsReview(doc, parsed, customFieldIds);
       return { docId: doc.id, status: 'needs-review', reason: parsed.reason ?? null };
+    }
+
+    // Duplicate-guard: before importing, compare against existing Actual
+    // transactions in a window around the parsed date. Per-doc failures here
+    // surface as status 'error' via the importPass try/catch and never abort
+    // the batch. The guard only runs on clean parses with a usable
+    // amount+date (a date-less parse falls through to the existing import
+    // path unchanged).
+    if (
+      duplicateGuardEnabled &&
+      parsed.date != null &&
+      Number.isInteger(parsed.amount)
+    ) {
+      const api = await getActual();
+      const accountId = await accountIdForDoc(doc, signalMatches);
+      const { start, end } = duplicateWindow(parsed.date, duplicateWindowDays);
+      const txns = await getTransactions(api, accountId, start, end);
+      const existing = findDuplicateCandidate(txns, parsed, doc.id);
+      if (existing != null) {
+        console.log(
+          `ab2pb: doc ${doc.id} "${doc.title ?? ''}" matches existing Actual txn ${existing.id} ` +
+            `(amount ${existing.amount}, date ${existing.date}); tagging possible-duplicate, not importing`,
+        );
+        await markPossibleDuplicate(doc, parsed, customFieldIds);
+        return { docId: doc.id, status: 'possible-duplicate', matchedTxnId: existing.id };
+      }
     }
 
     await writeBackParsed(doc, parsed, customFieldIds);

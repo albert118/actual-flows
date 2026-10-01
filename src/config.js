@@ -59,6 +59,10 @@ function isMissing(value) {
 // The three signal lists that accept either plain names or {name, account}.
 export const SIGNAL_LIST_KEYS = ['tags', 'documentTypes', 'correspondents'];
 
+// Default duplicate-guard window: look back/forward this many days around the
+// parsed date for a possibly-matching existing Actual transaction.
+export const DEFAULT_DUPLICATE_WINDOW_DAYS = 7;
+
 /**
  * Validates one `signals.*` entry and returns its stable normalised form.
  *
@@ -199,6 +203,34 @@ export function loadConfig({ configPath, env = process.env } = {}) {
         return entry;
       });
     }
+  }
+
+  // duplicateGuard is OPTIONAL and defaults to DISABLED (v1-compatible: docs
+  // import unconditionally once parsed). When enabled, a parsed doc whose
+  // amount/date/payee matches an existing Actual transaction in the window is
+  // tagged possible-duplicate instead of imported. `enabled` must be a
+  // boolean; `windowDays` (how far before/after the parsed date to look,
+  // default 7) must be a positive integer.
+  if (resolved.duplicateGuard === undefined) {
+    resolved.duplicateGuard = { enabled: false, windowDays: DEFAULT_DUPLICATE_WINDOW_DAYS };
+  } else if (
+    resolved.duplicateGuard == null ||
+    typeof resolved.duplicateGuard !== 'object' ||
+    Array.isArray(resolved.duplicateGuard)
+  ) {
+    throw new Error(`Invalid config: duplicateGuard must be an object [config: ${path}]`);
+  } else {
+    const { enabled, windowDays } = resolved.duplicateGuard;
+    if (enabled !== undefined && typeof enabled !== 'boolean') {
+      throw new Error(`Invalid config: duplicateGuard.enabled must be a boolean [config: ${path}]`);
+    }
+    if (windowDays !== undefined && (!Number.isInteger(windowDays) || windowDays < 1)) {
+      throw new Error(
+        `Invalid config: duplicateGuard.windowDays must be a positive integer [config: ${path}]`,
+      );
+    }
+    if (enabled === undefined) resolved.duplicateGuard.enabled = false;
+    if (windowDays === undefined) resolved.duplicateGuard.windowDays = DEFAULT_DUPLICATE_WINDOW_DAYS;
   }
 
   return resolved;

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createBridge, NEEDS_REVIEW_TAG } from '../src/bridge.js';
+import { createBridge, NEEDS_REVIEW_TAG, POSSIBLE_DUPLICATE_TAG } from '../src/bridge.js';
 
 // Stage 4 orchestration tests with fully injected fake paperless/actual/parse
 // clients — no real network, no @actual-app/api involvement.
@@ -118,7 +118,8 @@ function makePaperless({ candidates = [], tagNames = {}, docTypes = {}, correspo
  * account names that exist; ids are derived as `acct-<lowercased name>` so
  * `Cash` resolves to `acct-cash` as before. `getIDByName` returns null for
  * names outside the list, so resolveAccount falls back to getAccounts() and
- * throws when the account genuinely does not exist.
+ * throws when the account genuinely does not exist. `transactions` is what
+ * getTransactions returns; it can be replaced later via setTransactions().
  */
 function makeActual({
   added = [],
@@ -126,8 +127,11 @@ function makeActual({
   errors = [],
   shutdown = async () => {},
   accounts = [CONFIG.actual.defaultAccountName],
+  transactions = [],
 } = {}) {
   const imports = [];
+  const txnCalls = [];
+  let txnList = transactions;
   const byName = new Map(accounts.map((name) => [name, `acct-${name.toLowerCase()}`]));
   const handle = {
     getIDByName: async (type, name) => byName.get(name) ?? null,
@@ -137,9 +141,17 @@ function makeActual({
       imports.push({ accountId, txns, opts });
       return { errors, added, updated };
     },
+    getTransactions: async (accountId, start, end) => {
+      txnCalls.push({ accountId, start, end });
+      return txnList;
+    },
     shutdown,
   };
   handle.imports = imports;
+  handle.txnCalls = txnCalls;
+  handle.setTransactions = (next) => {
+    txnList = next;
+  };
   return handle;
 }
 
@@ -777,4 +789,201 @@ test('Stage3: import passes resolved income ids too; income lookups stay read-on
   assert.deepEqual(seenCtx.incomeSignals.documentTypeIds, []);
   // Only the watch signal tag is ensured; the income tag resolved read-only.
   assert.equal(paperless.ensureCalls(), 1, 'income tag is resolved via tagIdByName, never ensured');
+});
+
+// --- Tier A item 4: duplicate-guard -----------------------------------------
+
+const GUARD_ON = { ...CONFIG, duplicateGuard: { enabled: true } };
+
+test('AC21: duplicate-guard is off by default — no Actual lookup, import proceeds', async () => {
+  const candidate = doc(7);
+  const paperless = makePaperless({ candidates: [candidate] });
+  // A txn that WOULD match, to prove the guard is what keeps it from being used.
+  const actual = makeActual({
+    added: ['txn-7'],
+    transactions: [
+      { id: 't-existing', amount: -5000, date: '2026-10-01', payee_name: 'Acme Pty Ltd' },
+    ],
+  });
+  const bridge = createBridge({ config: CONFIG, paperless, actual, parse: () => GOOD_PARSE });
+
+  const res = await bridge.import();
+
+  assert.equal(actual.txnCalls.length, 0, 'no getTransactions when the guard is off');
+  assert.equal(actual.imports.length, 1, 'document is imported as before');
+  assert.equal(res.results[0].status, 'imported');
+});
+
+test('AC21b: enabled guard tags a matching existing txn as possible-duplicate', async () => {
+  const candidate = doc(7);
+  const paperless = makePaperless({ candidates: [candidate] });
+  const actual = makeActual({
+    added: ['should-not-be-used'],
+    transactions: [
+      // Same amount + date, payee is a superstring of the parsed payee.
+      { id: 't-existing', amount: -5000, date: '2026-10-01', payee_name: 'Acme Pty Ltd' },
+    ],
+  });
+  const bridge = createBridge({ config: GUARD_ON, paperless, actual, parse: () => GOOD_PARSE });
+
+  const res = await bridge.import();
+
+  assert.equal(actual.imports.length, 0, 'no transaction imported for a likely duplicate');
+  assert.equal(res.results[0].status, 'possible-duplicate');
+  assert.equal(res.results[0].matchedTxnId, 't-existing');
+
+  const patch = paperless.writes.at(-1);
+  const cf = patch.changes.custom_fields;
+  assert.ok(
+    cf.some((e) => e.field === 2 && e.value === 'possible-duplicate'),
+    "status set to 'possible-duplicate'",
+  );
+  assert.ok(cf.some((e) => e.field === 3 && e.value === '-50.00'), 'amount written back');
+  assert.ok(cf.some((e) => e.field === 4 && e.value === '2026-10-01'), 'date written back');
+  assert.ok(cf.some((e) => e.field === 5 && e.value === 'Acme'), 'payee written back');
+
+  const dupTagId = paperless.tagNames[POSSIBLE_DUPLICATE_TAG];
+  assert.ok(dupTagId != null, 'possible-duplicate tag was created');
+  assert.ok(patch.changes.tags.includes(dupTagId), 'doc is tagged possible-duplicate');
+
+  // Checked the default account over the default 7-day window.
+  assert.deepEqual(actual.txnCalls[0], {
+    accountId: 'acct-cash',
+    start: '2026-09-24',
+    end: '2026-10-08',
+  });
+});
+
+test('AC21c: enabled guard imports when nothing matches (amount/date/payee)', async () => {
+  const candidate = doc(7);
+  const paperless = makePaperless({ candidates: [candidate] });
+  const actual = makeActual({
+    added: ['txn-7'],
+    transactions: [
+      { id: 't-amount', amount: -1234, date: '2026-10-01', payee_name: 'Acme Pty Ltd' },
+      { id: 't-date', amount: -5000, date: '2026-10-03', payee_name: 'Acme Pty Ltd' },
+      { id: 't-payee', amount: -5000, date: '2026-10-01', payee_name: 'Completely Different' },
+    ],
+  });
+  const bridge = createBridge({ config: GUARD_ON, paperless, actual, parse: () => GOOD_PARSE });
+
+  const res = await bridge.import();
+
+  assert.equal(actual.txnCalls.length, 1, 'the guard checked Actual once');
+  assert.equal(actual.imports.length, 1, 'no match means a normal import');
+  assert.equal(res.results[0].status, 'imported');
+});
+
+test("AC21d: the bridge's own paperless:<docId> txn is not a duplicate", async () => {
+  const candidate = doc(7); // no imported field → not skipped as already-imported
+  const paperless = makePaperless({ candidates: [candidate] });
+  const actual = makeActual({
+    added: ['txn-7'],
+    transactions: [
+      { id: 't-own', amount: -5000, date: '2026-10-01', payee_name: 'Acme', imported_id: 'paperless:7' },
+    ],
+  });
+  const bridge = createBridge({ config: GUARD_ON, paperless, actual, parse: () => GOOD_PARSE });
+
+  const res = await bridge.import();
+
+  assert.equal(res.results[0].status, 'imported', 'own txn does not block the import');
+  assert.equal(actual.imports.length, 1);
+  assert.equal(actual.imports[0].txns[0].imported_id, 'paperless:7');
+});
+
+test('AC21e: a txn outside the window does not flag the doc', async () => {
+  const candidate = doc(7);
+  const paperless = makePaperless({ candidates: [candidate] });
+  // Same amount + matching payee, but dated well outside the window — even if
+  // returned by Actual it must not match (the guard checks date equality).
+  const actual = makeActual({
+    added: ['txn-7'],
+    transactions: [{ id: 't-old', amount: -5000, date: '2026-09-20', payee_name: 'Acme' }],
+  });
+  const bridge = createBridge({
+    config: { ...CONFIG, duplicateGuard: { enabled: true, windowDays: 3 } },
+    paperless,
+    actual,
+    parse: () => GOOD_PARSE,
+  });
+
+  const res = await bridge.import();
+
+  assert.deepEqual(actual.txnCalls[0], {
+    accountId: 'acct-cash',
+    start: '2026-09-28',
+    end: '2026-10-04',
+  });
+  assert.equal(res.results[0].status, 'imported', 'out-of-window txn does not flag the doc');
+  assert.equal(actual.imports.length, 1);
+});
+
+test('AC21f: a getTransactions failure fails that doc only, batch continues', async () => {
+  const bad = doc(1);
+  const good = doc(2);
+  const paperless = makePaperless({ candidates: [bad, good] });
+  const actual = makeActual({ added: ['txn-2'] });
+  let calls = 0;
+  actual.getTransactions = async () => {
+    calls += 1;
+    if (calls === 1) throw new Error('actual offline');
+    return [];
+  };
+  const bridge = createBridge({ config: GUARD_ON, paperless, actual, parse: () => GOOD_PARSE });
+
+  let res;
+  await assert.doesNotReject(async () => {
+    res = await bridge.import();
+  });
+
+  assert.deepEqual(
+    res.results.map((r) => r.status),
+    ['error', 'imported'],
+  );
+  const badPatch = paperless.writes.find((w) => w.id === 1);
+  assert.ok(
+    badPatch.changes.custom_fields.some((e) => e.field === 2 && e.value === 'error'),
+    "failing doc gets status 'error'",
+  );
+  assert.equal(actual.imports.length, 1);
+  assert.equal(actual.imports[0].txns[0].imported_id, 'paperless:2');
+});
+
+test('AC21g: a doc already flagged possible-duplicate is terminal (skipped)', async () => {
+  const flagged = doc(7, { custom_fields: [{ field: 2, value: 'possible-duplicate' }] });
+  const paperless = makePaperless({ candidates: [flagged] });
+  const actual = makeActual({
+    added: ['txn-7'],
+    transactions: [{ id: 't', amount: -5000, date: '2026-10-01', payee_name: 'Acme' }],
+  });
+  const bridge = createBridge({ config: GUARD_ON, paperless, actual, parse: () => GOOD_PARSE });
+
+  const res = await bridge.import();
+
+  assert.deepEqual(res.results, [{ docId: 7, status: 'skipped' }]);
+  assert.equal(actual.txnCalls.length, 0, 'terminal doc is not re-examined');
+  assert.equal(paperless.writes.length, 0, 'no re-PATCH for a terminal doc');
+  assert.equal(actual.imports.length, 0, 'terminal doc is never imported');
+});
+
+test('AC21h: the possible-duplicate tag is ensured once per session', async () => {
+  const d1 = doc(1);
+  const d2 = doc(2);
+  const paperless = makePaperless({ candidates: [d1, d2] });
+  const actual = makeActual({
+    transactions: [{ id: 't', amount: -5000, date: '2026-10-01', payee_name: 'Acme' }],
+  });
+  const bridge = createBridge({ config: GUARD_ON, paperless, actual, parse: () => GOOD_PARSE });
+
+  const res = await bridge.import();
+
+  assert.deepEqual(
+    res.results.map((r) => r.status),
+    ['possible-duplicate', 'possible-duplicate'],
+  );
+  assert.equal(actual.imports.length, 0);
+  // ensureTag calls: the watch signal tag + the possible-duplicate tag once.
+  assert.equal(paperless.ensureCalls(), 2, 'possible-duplicate tag ensured once across docs');
+  assert.ok(paperless.tagNames[POSSIBLE_DUPLICATE_TAG] != null);
 });
