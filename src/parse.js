@@ -171,6 +171,8 @@ function normalizeCtx(ctx = {}) {
     incomeSignals: {
       documentTypes: Array.isArray(signals.documentTypes) ? signals.documentTypes : [],
       tags: Array.isArray(signals.tags) ? signals.tags : [],
+      documentTypeIds: Array.isArray(signals.documentTypeIds) ? signals.documentTypeIds : [],
+      tagIds: Array.isArray(signals.tagIds) ? signals.tagIds : [],
     },
   };
 }
@@ -346,16 +348,30 @@ function resolvePayee(doc, manualPayee) {
 }
 
 function isIncomeDocument(doc, content, ctx) {
-  const { documentTypes, tags } = ctx.incomeSignals;
+  const { documentTypes, tags, documentTypeIds, tagIds } = ctx.incomeSignals;
   const docType = doc.document_type;
   const docTags = Array.isArray(doc.tags) ? doc.tags : [];
-  const hits = (list) =>
+
+  // String-name path: matches name-keyed fixtures/ctx (doc.document_type /
+  // doc.tags carry the literal names) by string coercion.
+  const nameHits = (list) =>
     list.some((v) => {
       const s = String(v);
       if (docType != null && String(docType) === s) return true;
       return docTags.some((t) => String(t) === s);
     });
-  if (hits(documentTypes) || hits(tags)) return true;
+
+  // Numeric-id path (Stage 3): real Paperless documents carry numeric
+  // tag/document_type ids; match those against the resolved id lists strictly
+  // so a name like 'invoice' never string-coerces into a numeric id match.
+  const idHits = (list) =>
+    list.some((id) => {
+      if (docType != null && docType === id) return true;
+      return docTags.some((t) => t === id);
+    });
+
+  if (nameHits(documentTypes) || nameHits(tags)) return true;
+  if (idHits(documentTypeIds) || idHits(tagIds)) return true;
   return INCOME_KEYWORDS_RE.test(content);
 }
 
@@ -461,7 +477,8 @@ function detectCurrency(content, token, home) {
  * @param {object}  doc  {id, title, content, created, document_type, tags,
  *                       correspondent, custom_fields}
  * @param {object}  ctx  {currency, timezone, dateFormats, fields,
- *                       incomeSignals: {documentTypes, tags}, fieldIds,
+ *                       incomeSignals: {documentTypes, tags,
+ *                       documentTypeIds, tagIds}, fieldIds,
  *                       manualAmount, manualDate, manualPayee}
  * @returns {{ok: boolean, amount: number|null, date: string|null,
  *            payee: string|null, currency: string|null, sign: string,

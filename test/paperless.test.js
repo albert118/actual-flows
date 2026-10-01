@@ -147,6 +147,102 @@ test('AC5b: defends client-side against docs that already carry the imported fie
   assert.deepEqual(candidates, []);
 });
 
+// --- listSignalDocsInRange (reconcile) --------------------------------------
+
+// Generic paginated documents handler WITHOUT the custom_field_query filter:
+// listSignalDocsInRange lists every signal doc, filtered client-side.
+function makeRangeDocsApi(docs, pageSize) {
+  return (url) => {
+    const params = url.searchParams;
+    const page = Number(params.get('page') ?? '1');
+    const pageSizeActual = Number(params.get('page_size'));
+    const start = (page - 1) * pageSizeActual;
+    const results = docs.slice(start, start + pageSizeActual);
+    const next =
+      start + results.length < docs.length
+        ? `${url.origin}/api/documents/?page=${page + 1}&page_size=${pageSizeActual}&ordering=added`
+        : null;
+    return Promise.resolve(
+      jsonResponse({ count: docs.length, next, previous: null, results }),
+    );
+  };
+}
+
+test('listSignalDocsInRange returns signal docs in range with importedValue', async () => {
+  const docs = [
+    baseDoc({ id: 1, title: 'in window, imported', tags: [10], created: '2025-08-01T00:00:00Z', custom_fields: [{ field: IMPORTED_FIELD_ID, value: 'txn-1' }] }),
+    baseDoc({ id: 2, title: 'in window, unimported', tags: [10], created: '2025-12-01T00:00:00Z' }),
+    baseDoc({ id: 3, title: 'before start', tags: [10], created: '2025-06-30T23:59:59Z' }),
+    baseDoc({ id: 4, title: 'after end', tags: [10], created: '2027-07-01T00:00:00Z' }),
+    baseDoc({ id: 5, title: 'no signal', created: '2025-09-01T00:00:00Z' }),
+  ];
+  const fetchImpl = makeFetch(makeRangeDocsApi(docs));
+  const client = createPaperlessClient({ baseUrl: 'http://paperless:8000', token: 't', fetchImpl });
+
+  const found = await client.listSignalDocsInRange({
+    importedFieldName: 'actual_transaction_id',
+    signals: SIGNALS,
+    customFieldIds: CUSTOM_FIELD_IDS,
+    start: '2025-07-01',
+    end: '2027-06-30',
+  });
+
+  assert.deepEqual(found, [
+    { id: 1, title: 'in window, imported', importedValue: 'txn-1' },
+    { id: 2, title: 'in window, unimported', importedValue: null },
+  ]);
+  // In-range but non-signal docs are excluded too, and no custom_field_query
+  // filter is applied (unlike listCandidateDocs).
+  const firstUrl = new URL(fetchImpl.calls[0].url);
+  assert.equal(firstUrl.searchParams.get('custom_field_query'), null);
+  assert.equal(firstUrl.searchParams.get('ordering'), 'added');
+});
+
+test('listSignalDocsInRange is paginated and prefers `added` over `created`', async () => {
+  const docs = [
+    baseDoc({ id: 1, tags: [10], created: '2025-07-01T00:00:00Z' }),
+    baseDoc({ id: 2, tags: [10], created: '2025-06-01T00:00:00Z', added: '2025-08-01T00:00:00Z' }),
+    baseDoc({ id: 3, tags: [10], created: '2025-09-01T00:00:00Z' }),
+  ];
+  const fetchImpl = makeFetch(makeRangeDocsApi(docs));
+  const client = createPaperlessClient({ baseUrl: 'http://paperless:8000', token: 't', fetchImpl });
+
+  const found = await client.listSignalDocsInRange({
+    importedFieldName: 'actual_transaction_id',
+    signals: SIGNALS,
+    customFieldIds: CUSTOM_FIELD_IDS,
+    start: '2025-07-01',
+    end: '2025-12-31',
+    pageSize: 2,
+  });
+
+  // Doc 2 created in June but added in August is kept (added wins); doc 3 is
+  // returned via the second page.
+  assert.deepEqual(found.map((d) => d.id), [1, 2, 3]);
+  assert.equal(fetchImpl.calls.length, 2, 'paginated across two pages');
+});
+
+test('listSignalDocsInRange returns null importedValue when the field is unset', async () => {
+  const docWithEmpty = baseDoc({
+    id: 1,
+    tags: [10],
+    created: '2025-08-01T00:00:00Z',
+    custom_fields: [{ field: IMPORTED_FIELD_ID, value: '' }],
+  });
+  const fetchImpl = makeFetch(makeRangeDocsApi([docWithEmpty]));
+  const client = createPaperlessClient({ baseUrl: 'http://paperless:8000', token: 't', fetchImpl });
+
+  const found = await client.listSignalDocsInRange({
+    importedFieldName: 'actual_transaction_id',
+    signals: SIGNALS,
+    customFieldIds: CUSTOM_FIELD_IDS,
+    start: '2025-07-01',
+    end: '2025-12-31',
+  });
+
+  assert.deepEqual(found, [{ id: 1, title: 'doc', importedValue: null }]);
+});
+
 // --- listCustomFields, tags, getDocument -----------------------------------
 
 test('listCustomFields maps custom field names to ids', async () => {

@@ -13,7 +13,12 @@ Usage:
   ab2pb --import    Run a single import pass
   ab2pb --once      Poll once and exit
   ab2pb --poll [s]  Watch Paperless continuously (interval in seconds, default 60)
-  ab2pb --reconcile Reconcile report (v2, not yet implemented)
+  ab2pb --reconcile [year]
+                    Read-only reconcile report: signal docs without a
+                    transaction, dangling paperless:<id> transactions, and
+                    non-paperless transactions. Default window is the current
+                    + previous AU financial year; pass a year (e.g. 2025) for
+                    the single FY ending 30 June of that year.
 
 Environment:
   AB2PB_CONFIG      Path to config JSON (default ./config.json)
@@ -26,7 +31,7 @@ const KNOWN_FLAGS = new Set(['--check', '--dry-run', '--import', '--once', '--po
 
 // --dry-run must make ZERO writes, so it does not connect to Actual either
 // (connecting downloads the budget to disk and resolves the account).
-const CONNECT_FLAGS = new Set(['--import', '--once', '--poll']);
+const CONNECT_FLAGS = new Set(['--import', '--once', '--poll', '--reconcile']);
 
 function fail(message) {
   console.error(`ab2pb: ${message}`);
@@ -45,17 +50,8 @@ async function run() {
     return;
   }
 
-  // --reconcile is a v2 stub: it needs no config or network yet, so it is
-  // routed before config loading to keep it crash-proof (and testable) in a
-  // fresh checkout without a config.json.
-  if (flag === '--reconcile') {
-    try {
-      await runReconcile({ config: null, paperless: null, actual: null });
-    } catch (err) {
-      fail(err.message ?? String(err));
-    }
-    return;
-  }
+  // --reconcile needs config + network (read-only), so it routes through the
+  // normal config/connect path below and runs after the bridge is built.
 
   let config;
   let actual = null;
@@ -74,16 +70,18 @@ async function run() {
     return;
   }
 
+  const paperless = createPaperlessClient({
+    baseUrl: config.paperless.baseUrl,
+    token: config.paperless.token,
+    apiVersion: config.paperless.apiVersion,
+  });
+
   const bridge = createBridge({
     config,
-    paperless: createPaperlessClient({
-      baseUrl: config.paperless.baseUrl,
-      token: config.paperless.token,
-      apiVersion: config.paperless.apiVersion,
-    }),
-    // actual is injected for --import/--once/--poll. --dry-run leaves it unset
-    // and never connects (zero-write). --check also leaves it unset, but
-    // bridge.check() connects lazily to resolve the Actual account.
+    paperless,
+    // actual is injected for --import/--once/--poll/--reconcile. --dry-run
+    // leaves it unset and never connects (zero-write). --check also leaves it
+    // unset, but bridge.check() connects lazily to resolve the Actual account.
     actual,
   });
 
@@ -97,6 +95,16 @@ async function run() {
       await bridge.import();
     } else if (flag === '--once') {
       await bridge.once();
+    } else if (flag === '--reconcile') {
+      let year;
+      if (extra !== undefined && extra !== '') {
+        const parsed = Number(extra);
+        if (!Number.isInteger(parsed)) {
+          throw new Error(`invalid year for --reconcile: "${extra}" (expected YYYY)`);
+        }
+        year = parsed;
+      }
+      await runReconcile({ config, paperless, actual, year });
     } else {
       const seconds = Number.parseInt(extra, 10);
       const intervalMs = Number.isInteger(seconds) && seconds > 0 ? seconds * 1000 : DEFAULT_POLL_INTERVAL_MS;

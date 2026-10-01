@@ -13,6 +13,26 @@ function resolveUrl(url, baseUrl) {
 }
 
 /**
+ * Shared signal OR-filter: a document matches when its `tags` intersect
+ * `tagIds`, or its `document_type` is in `documentTypeIds`, or its
+ * `correspondent` is in `correspondentIds`.
+ */
+function matchesSignal(doc, { tagIds = [], documentTypeIds = [], correspondentIds = [] } = {}) {
+  const tags = Array.isArray(doc.tags) ? doc.tags : [];
+  return (
+    tags.some((tagId) => tagIds.includes(tagId)) ||
+    documentTypeIds.includes(doc.document_type) ||
+    correspondentIds.includes(doc.correspondent)
+  );
+}
+
+/** Normalises the signal id lists, defaulting missing keys to empty arrays. */
+function normaliseSignals(signals = {}) {
+  const { tagIds = [], documentTypeIds = [], correspondentIds = [] } = signals;
+  return { tagIds, documentTypeIds, correspondentIds };
+}
+
+/**
  * Creates a Paperless-ngx API client.
  *
  * @param {object} config
@@ -120,7 +140,7 @@ export function createPaperlessClient({
     signals = {},
     customFieldIds,
   } = {}) {
-    const { tagIds = [], documentTypeIds = [], correspondentIds = [] } = signals;
+    const { tagIds, documentTypeIds, correspondentIds } = normaliseSignals(signals);
 
     const customFieldQuery = JSON.stringify([importedFieldName, 'exists', false]);
     const importedFieldId = customFieldIds?.get(importedFieldName);
@@ -153,13 +173,70 @@ export function createPaperlessClient({
         if (alreadyImported) return false;
       }
 
-      const tags = Array.isArray(doc.tags) ? doc.tags : [];
-      return (
-        tags.some((tagId) => tagIds.includes(tagId)) ||
-        documentTypeIds.includes(doc.document_type) ||
-        correspondentIds.includes(doc.correspondent)
-      );
+      return matchesSignal(doc, { tagIds, documentTypeIds, correspondentIds });
     });
+  }
+
+  /**
+   * Lists signal documents whose added/created date falls within [start, end]
+   * (inclusive, compared as YYYY-MM-DD date parts), across all pages, applying
+   * the same signal OR-filter as listCandidateDocs but WITHOUT the
+   * "imported field exists=false" filter: reconcile needs every signal doc in
+   * the window (imported or not) so it can read the imported-field value.
+   *
+   * Returns one entry per doc: `{id, title, importedValue}` where
+   * `importedValue` is the value of the imported custom field (`null` when
+   * unset).
+   *
+   * @param {object} opts
+   * @param {string} opts.importedFieldName custom field holding the Actual transaction id
+   * @param {{tagIds?: number[], documentTypeIds?: number[], correspondentIds?: number[]}} [opts.signals]
+   * @param {Map<string, number>} [opts.customFieldIds] name→id map
+   * @param {string} opts.start inclusive lower bound, YYYY-MM-DD
+   * @param {string} opts.end   inclusive upper bound, YYYY-MM-DD
+   * @param {number} [opts.pageSize=100]
+   * @returns {Promise<Array<{id: number, title: string|null, importedValue: string|null}>>}
+   */
+  async function listSignalDocsInRange({
+    importedFieldName,
+    signals = {},
+    customFieldIds,
+    start,
+    end,
+    pageSize = 100,
+  } = {}) {
+    const { tagIds, documentTypeIds, correspondentIds } = normaliseSignals(signals);
+    const importedFieldId = customFieldIds?.get(importedFieldName);
+
+    const firstParams = new URLSearchParams({
+      page_size: String(pageSize),
+      ordering: 'added',
+    });
+
+    const docs = [];
+    let nextUrl = `/api/documents/?${firstParams}`;
+    while (nextUrl) {
+      const page = await request(nextUrl);
+      docs.push(...(page.results ?? []));
+      nextUrl = page.next ? resolveUrl(page.next, api.baseUrl) : null;
+    }
+
+    return docs
+      .filter((doc) => {
+        if (!matchesSignal(doc, { tagIds, documentTypeIds, correspondentIds })) return false;
+        const day = String(doc.added ?? doc.created ?? '').slice(0, 10);
+        return day >= start && day <= end;
+      })
+      .map((doc) => {
+        let importedValue = null;
+        if (importedFieldId != null && Array.isArray(doc.custom_fields)) {
+          const entry = doc.custom_fields.find(
+            (e) => e && e.field === importedFieldId && e.value != null && e.value !== '',
+          );
+          if (entry) importedValue = String(entry.value);
+        }
+        return { id: doc.id, title: doc.title ?? null, importedValue };
+      });
   }
 
   /** @returns {Promise<object>} full document */
@@ -202,6 +279,7 @@ export function createPaperlessClient({
     listDocumentTypes,
     listCorrespondents,
     listCandidateDocs,
+    listSignalDocsInRange,
     getDocument,
     tagIdByName,
     ensureTag,

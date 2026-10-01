@@ -20,9 +20,17 @@
     "defaultAccountName": "Cash"
   },
   "signals": {
-    "tags": ["invoice", "receipt", "bill"],
+    "tags": [
+      "invoice",
+      { "name": "bill", "account": "Amex" },
+      "receipt"
+    ],
     "documentTypes": [],
     "correspondents": []
+  },
+  "incomeSignals": {
+    "documentTypes": [],
+    "tags": ["dividend"]
   },
   "locale": {
     "currency": "AUD",

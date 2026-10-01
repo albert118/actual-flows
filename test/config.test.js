@@ -135,3 +135,129 @@ test('non-secret fields survive resolution unchanged', () => {
   assert.deepEqual(config.signals.tags, ['invoice']);
   assert.equal(config.locale.currency, 'AUD');
 });
+
+// --- Stage 2: per-signal account mapping (normalisation + validation) -------
+
+const SECRET_ENV = { PAPERLESS_TOKEN: 't', ACTUAL_PASSWORD: 'p', ACTUAL_SYNC_ID: 's' };
+
+test('Stage2: object entries are normalised in place, plain strings preserved, order kept', () => {
+  const configPath = writeConfig({
+    signals: {
+      tags: ['invoice', { name: 'bill', account: 'Amex' }, { name: 'receipt' }],
+      documentTypes: [{ name: 'statement', account: 'Bank' }, 'credit-note'],
+      correspondents: [],
+    },
+  });
+  const config = loadConfig({ configPath, env: SECRET_ENV });
+  assert.deepEqual(config.signals.tags, [
+    'invoice',
+    { name: 'bill', account: 'Amex' },
+    { name: 'receipt' },
+  ]);
+  assert.deepEqual(config.signals.documentTypes, [
+    { name: 'statement', account: 'Bank' },
+    'credit-note',
+  ]);
+  assert.deepEqual(config.signals.correspondents, []);
+});
+
+test('Stage2: object entry without account is valid and normalised to {name}', () => {
+  const configPath = writeConfig({
+    signals: { tags: [{ name: 'bill' }], documentTypes: [], correspondents: [] },
+  });
+  const config = loadConfig({ configPath, env: SECRET_ENV });
+  assert.deepEqual(config.signals.tags, [{ name: 'bill' }]);
+});
+
+test('Stage2: extra keys on an object entry are dropped in normalisation', () => {
+  const configPath = writeConfig({
+    signals: { tags: [{ name: 'bill', account: 'Amex', junk: 'x' }], documentTypes: [], correspondents: [] },
+  });
+  const config = loadConfig({ configPath, env: SECRET_ENV });
+  assert.deepEqual(config.signals.tags, [{ name: 'bill', account: 'Amex' }]);
+});
+
+test('Stage2: non-string/non-object entry throws a clear error', () => {
+  const configPath = writeConfig({
+    signals: { tags: ['invoice', 42], documentTypes: [], correspondents: [] },
+  });
+  assert.throws(() => loadConfig({ configPath, env: SECRET_ENV }), /signals\.tags\[1\]/);
+});
+
+test('Stage2: object entry with non-empty-but-blank name throws', () => {
+  const configPath = writeConfig({
+    signals: { tags: [{ name: '   ' }], documentTypes: [], correspondents: [] },
+  });
+  assert.throws(() => loadConfig({ configPath, env: SECRET_ENV }), /signals\.tags\[0\]\.name/);
+});
+
+test('Stage2: object entry with blank account throws', () => {
+  const configPath = writeConfig({
+    signals: { tags: [{ name: 'bill', account: '   ' }], documentTypes: [], correspondents: [] },
+  });
+  assert.throws(() => loadConfig({ configPath, env: SECRET_ENV }), /signals\.tags\[0\]\.account/);
+});
+
+test('Stage2: non-array signals list throws a clear error', () => {
+  const configPath = writeConfig({
+    signals: { tags: 'invoice', documentTypes: [], correspondents: [] },
+  });
+  assert.throws(() => loadConfig({ configPath, env: SECRET_ENV }), /signals\.tags must be an array/);
+});
+
+// --- Stage 3: incomeSignals -------------------------------------------------
+
+test('Stage3: incomeSignals absent defaults to empty lists', () => {
+  const configPath = writeConfig(); // no incomeSignals key in the base config
+  const config = loadConfig({ configPath, env: SECRET_ENV });
+  assert.deepEqual(config.incomeSignals, { documentTypes: [], tags: [] });
+});
+
+test('Stage3: valid income signal names are preserved verbatim', () => {
+  const configPath = writeConfig({
+    incomeSignals: { documentTypes: ['credit note', 'dividend-statement'], tags: ['dividend'] },
+  });
+  const config = loadConfig({ configPath, env: SECRET_ENV });
+  assert.deepEqual(config.incomeSignals, {
+    documentTypes: ['credit note', 'dividend-statement'],
+    tags: ['dividend'],
+  });
+});
+
+test('Stage3: missing incomeSignals sub-key defaults to an empty array', () => {
+  const configPath = writeConfig({ incomeSignals: { tags: ['dividend'] } });
+  const config = loadConfig({ configPath, env: SECRET_ENV });
+  assert.deepEqual(config.incomeSignals, { documentTypes: [], tags: ['dividend'] });
+});
+
+test('Stage3: non-object incomeSignals throws a clear error', () => {
+  const configPath = writeConfig({ incomeSignals: 'dividend' });
+  assert.throws(() => loadConfig({ configPath, env: SECRET_ENV }), /incomeSignals must be an object/);
+});
+
+test('Stage3: non-array incomeSignals list throws a clear error', () => {
+  const configPath = writeConfig({ incomeSignals: { documentTypes: 'credit note', tags: [] } });
+  assert.throws(
+    () => loadConfig({ configPath, env: SECRET_ENV }),
+    /incomeSignals\.documentTypes must be an array/,
+  );
+});
+
+test('Stage3: non-string incomeSignals entry throws a clear error', () => {
+  const configPath = writeConfig({
+    incomeSignals: { documentTypes: ['credit note', 42], tags: [] },
+  });
+  assert.throws(() => loadConfig({ configPath, env: SECRET_ENV }), /incomeSignals\.documentTypes\[1\]/);
+});
+
+test('Stage3: blank incomeSignals entry throws a clear error', () => {
+  const configPath = writeConfig({ incomeSignals: { documentTypes: [], tags: ['   '] } });
+  assert.throws(() => loadConfig({ configPath, env: SECRET_ENV }), /incomeSignals\.tags\[0\]/);
+});
+
+test('Stage3: incomeSignals accepts plain names only — object entries are rejected', () => {
+  const configPath = writeConfig({
+    incomeSignals: { documentTypes: [], tags: [{ name: 'dividend' }] },
+  });
+  assert.throws(() => loadConfig({ configPath, env: SECRET_ENV }), /incomeSignals\.tags\[0\]/);
+});

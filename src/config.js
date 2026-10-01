@@ -56,6 +56,55 @@ function isMissing(value) {
   );
 }
 
+// The three signal lists that accept either plain names or {name, account}.
+export const SIGNAL_LIST_KEYS = ['tags', 'documentTypes', 'correspondents'];
+
+/**
+ * Validates one `signals.*` entry and returns its stable normalised form.
+ *
+ * A plain string is kept as-is (back-compat: such entries map to the default
+ * account). A `{name, account}` object is returned as a clean two-key object —
+ * `name` must be a non-empty string and `account`, when present, a non-empty
+ * string. Anything else throws a clear error naming the exact list + index.
+ *
+ * @param {unknown} entry
+ * @param {string} key        list name, e.g. 'tags'
+ * @param {number} index      position within the list
+ * @param {string} configPath origin config file, for the error message
+ */
+export function normaliseSignalEntry(entry, key, index, configPath) {
+  if (typeof entry === 'string') return entry;
+
+  if (entry != null && typeof entry === 'object' && !Array.isArray(entry)) {
+    const { name, account } = entry;
+    if (typeof name !== 'string' || name.trim() === '') {
+      throw new Error(
+        `Invalid config: signals.${key}[${index}].name must be a non-empty string [config: ${configPath}]`,
+      );
+    }
+    if (account !== undefined && (typeof account !== 'string' || account.trim() === '')) {
+      throw new Error(
+        `Invalid config: signals.${key}[${index}].account must be a non-empty string when set [config: ${configPath}]`,
+      );
+    }
+    return account !== undefined ? { name, account } : { name };
+  }
+
+  throw new Error(
+    `Invalid config: signals.${key}[${index}] must be a string or {name, account} [config: ${configPath}]`,
+  );
+}
+
+/** The signal name of an entry (plain string or {name, account}). */
+export function signalEntryName(entry) {
+  return typeof entry === 'string' ? entry : entry?.name;
+}
+
+/** The mapped account of an entry; undefined for plain strings. */
+export function signalEntryAccount(entry) {
+  return typeof entry === 'string' ? undefined : entry?.account;
+}
+
 /**
  * Reads the bridge config (AB2PB_CONFIG or `configPath`, default ./config.json),
  * overlays env secrets (PAPERLESS_TOKEN / ACTUAL_PASSWORD / ACTUAL_SYNC_ID), and
@@ -103,6 +152,53 @@ export function loadConfig({ configPath, env = process.env } = {}) {
     Array.isArray(resolved.signals)
   ) {
     throw new Error(`Missing required config: signals [config: ${path}]`);
+  }
+
+  // Normalise signal entries into the stable string | {name, account} shape,
+  // preserving config order; invalid entries fail fast with a clear error.
+  for (const key of SIGNAL_LIST_KEYS) {
+    const list = resolved.signals[key];
+    if (list === undefined) continue;
+    if (!Array.isArray(list)) {
+      throw new Error(`Invalid config: signals.${key} must be an array [config: ${path}]`);
+    }
+    resolved.signals[key] = list.map((entry, index) =>
+      normaliseSignalEntry(entry, key, index, path),
+    );
+  }
+
+  // incomeSignals is OPTIONAL: absent means "no income signals" (documents
+  // parse as expense unless content keywords match). When present it must be
+  // an object whose documentTypes/tags are arrays of non-empty-string names
+  // (kept verbatim — resolved to Paperless ids later by the bridge). Unlike
+  // `signals`, entries are plain names only, no {name, account} objects.
+  if (resolved.incomeSignals === undefined) {
+    resolved.incomeSignals = { documentTypes: [], tags: [] };
+  } else if (
+    resolved.incomeSignals == null ||
+    typeof resolved.incomeSignals !== 'object' ||
+    Array.isArray(resolved.incomeSignals)
+  ) {
+    throw new Error(`Invalid config: incomeSignals must be an object [config: ${path}]`);
+  } else {
+    for (const key of ['documentTypes', 'tags']) {
+      const list = resolved.incomeSignals[key];
+      if (list === undefined) {
+        resolved.incomeSignals[key] = [];
+        continue;
+      }
+      if (!Array.isArray(list)) {
+        throw new Error(`Invalid config: incomeSignals.${key} must be an array [config: ${path}]`);
+      }
+      resolved.incomeSignals[key] = list.map((entry, index) => {
+        if (typeof entry !== 'string' || entry.trim() === '') {
+          throw new Error(
+            `Invalid config: incomeSignals.${key}[${index}] must be a non-empty string [config: ${path}]`,
+          );
+        }
+        return entry;
+      });
+    }
   }
 
   return resolved;
