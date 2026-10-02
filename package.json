@@ -1,0 +1,19 @@
+{
+  "name": "actual-budget-to-paperless-ngx-bridge",
+  "version": "0.1.0",
+  "description": "Bridge that watches Paperless-ngx for ingested financial documents and imports deduplicated transactions into Actual Budget",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "ab2pb": "src/cli.js"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@actual-app/api": "^26.0.0"
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "paperless": {
+    "baseUrl": "http://paperless:8000",
+    "token": "${PAPERLESS_TOKEN}",
+    "apiVersion": 10,
+    "fields": {
+      "imported": "actual_transaction_id",
+      "status": "actual_status",
+      "amount": "actual_amount",
+      "date": "actual_date",
+      "payee": "actual_payee",
+      "currency": "actual_currency"
+    }
+  },
+  "actual": {
+    "serverUrl": "http://actual-server:5006",
+    "password": "${ACTUAL_PASSWORD}",
+    "budgetSyncId": "${ACTUAL_SYNC_ID}",
+    "dataDir": "/data",
+    "defaultAccountName": "Cash"
+  },
+  "signals": {
+    "tags": [
+      "invoice",
+      { "name": "bill", "account": "Amex" },
+      "receipt"
+    ],
+    "documentTypes": [],
+    "correspondents": []
+  },
+  "incomeSignals": {
+    "documentTypes": [],
+    "tags": ["dividend"]
+  },
+  "locale": {
+    "currency": "AUD",
+    "timezone": "Australia/Sydney",
+    "dateFormats": ["d/m/y", "d m y"]
+  }
+}

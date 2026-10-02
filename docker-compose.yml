@@ -1,0 +1,29 @@
+# Docker Compose configuration for the Actual <-> Paperless bridge.
+#
+# The bridge should join the shared Docker network that also carries your
+# Paperless-ngx and Actual Server instances so it can reach both services.
+# To join that network, uncomment the two blocks below and set the real
+# network name:
+#
+#   docker network ls
+#
+# Leave it commented out when the bridge can reach both services over the
+# default compose network or host networking.
+
+services:
+  ab2pb-bridge:
+    build: .
+    env_file: .env
+    volumes:
+      # The bridge reads ./config.json (AB2PB_CONFIG default) from /app — mount
+      # your config read-only. Create it first (cp config.example.json config.json).
+      - ./config.json:/app/config.json:ro
+      - ./data:/data
+    restart: unless-stopped
+    # networks:
+    #   - ab2pb-net
+
+# networks:
+#   ab2pb-net:
+#     external: true
+#     name: <your-shared-stack-network>  # replace with the real network name

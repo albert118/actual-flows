@@ -141,3 +141,12 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# Bridge runtime data
+/data
+
+# Local bridge config (see config.example.json for the template)
+/config.json
+
+# Working plans (mirror: vault content/projects/home office/plans/)
+/.plans
