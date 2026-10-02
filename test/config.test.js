@@ -261,3 +261,49 @@ test('Stage3: incomeSignals accepts plain names only — object entries are reje
   });
   assert.throws(() => loadConfig({ configPath, env: SECRET_ENV }), /incomeSignals\.tags\[0\]/);
 });
+
+// --- Tier A item 4: duplicateGuard ------------------------------------------
+
+test('TierA4: duplicateGuard absent defaults to disabled with the default window', () => {
+  const configPath = writeConfig(); // no duplicateGuard key in the base config
+  const config = loadConfig({ configPath, env: SECRET_ENV });
+  assert.deepEqual(config.duplicateGuard, { enabled: false, windowDays: 7 });
+});
+
+test('TierA4: duplicateGuard without windowDays defaults the window', () => {
+  const configPath = writeConfig({ duplicateGuard: { enabled: true } });
+  const config = loadConfig({ configPath, env: SECRET_ENV });
+  assert.deepEqual(config.duplicateGuard, { enabled: true, windowDays: 7 });
+});
+
+test('TierA4: duplicateGuard keeps an explicit window', () => {
+  const configPath = writeConfig({ duplicateGuard: { enabled: true, windowDays: 3 } });
+  const config = loadConfig({ configPath, env: SECRET_ENV });
+  assert.deepEqual(config.duplicateGuard, { enabled: true, windowDays: 3 });
+});
+
+test('TierA4: non-object duplicateGuard throws a clear error', () => {
+  const configPath = writeConfig({ duplicateGuard: 'yes' });
+  assert.throws(
+    () => loadConfig({ configPath, env: SECRET_ENV }),
+    /duplicateGuard must be an object/,
+  );
+});
+
+test('TierA4: non-boolean duplicateGuard.enabled throws a clear error', () => {
+  const configPath = writeConfig({ duplicateGuard: { enabled: 'yes' } });
+  assert.throws(
+    () => loadConfig({ configPath, env: SECRET_ENV }),
+    /duplicateGuard\.enabled must be a boolean/,
+  );
+});
+
+test('TierA4: invalid duplicateGuard.windowDays throws a clear error', () => {
+  for (const windowDays of [0, -1, 1.5, '7']) {
+    const configPath = writeConfig({ duplicateGuard: { enabled: true, windowDays } });
+    assert.throws(
+      () => loadConfig({ configPath, env: SECRET_ENV }),
+      /duplicateGuard\.windowDays must be a positive integer/,
+    );
+  }
+});
