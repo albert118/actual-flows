@@ -210,7 +210,10 @@ services:
   `env_file`.
 - `env_file: .env` feeds the secrets into the container (`PAPERLESS_TOKEN`,
   `ACTUAL_PASSWORD`, `ACTUAL_SYNC_ID`), which always win over config-file values.
-- `./data:/data` is where Actual's downloaded budget data is stored (`actual.dataDir`).
+- `./data:/data` is where Actual's downloaded budget data is stored (`actual.dataDir`). The
+  container runs as the unprivileged `node` user (uid 1000), so on a Linux host make the
+  directory writable by it before the first run (`mkdir -p data && chown 1000:1000 data`);
+  a directory Docker creates itself is owned by root and the bridge cannot write to it.
 - Bring it up with `docker compose up -d --build`; the container runs `--poll` continuously
   and restarts unless stopped. If the bridge can already reach both services over the default
   compose network, you can leave the network block commented out.

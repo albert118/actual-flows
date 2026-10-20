@@ -26,6 +26,19 @@ jobs:
                   node-version-file: .node-version
                   cache: npm
 
+            - name: Check Dockerfile Node matches .node-version
+              run: |
+                  expected="$(tr -d '[:space:]' < .node-version)"
+                  expected="${expected%%.*}"
+                  status=0
+                  for actual in $(sed -n 's/^FROM node:\([0-9]*\).*/\1/p' Dockerfile); do
+                      if [ "$actual" != "$expected" ]; then
+                          echo "Dockerfile uses Node '$actual' but .node-version is '$expected'" >&2
+                          status=1
+                      fi
+                  done
+                  exit "$status"
+
             - name: Install dependencies
               run: npm ci --no-audit --no-fund
 
