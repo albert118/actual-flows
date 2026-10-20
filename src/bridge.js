@@ -234,7 +234,7 @@ export function createBridge({ config, paperless, actual, parse = parseDoc } = {
       if (id != null) {
         tagIds.push(id);
         tags.push({ entry, id });
-      } else console.warn(`ab2pb: signal tag "${name}" does not exist in Paperless; skipping`);
+      } else console.warn(`actual-flows: signal tag "${name}" does not exist in Paperless; skipping`);
     }
 
     const documentTypeIds = [];
@@ -246,7 +246,7 @@ export function createBridge({ config, paperless, actual, parse = parseDoc } = {
       if (id != null) {
         documentTypeIds.push(id);
         documentTypes.push({ entry, id });
-      } else console.warn(`ab2pb: signal document type "${name}" does not exist; skipping`);
+      } else console.warn(`actual-flows: signal document type "${name}" does not exist; skipping`);
     }
 
     const correspondentIds = [];
@@ -258,7 +258,7 @@ export function createBridge({ config, paperless, actual, parse = parseDoc } = {
       if (id != null) {
         correspondentIds.push(id);
         correspondents.push({ entry, id });
-      } else console.warn(`ab2pb: signal correspondent "${name}" does not exist; skipping`);
+      } else console.warn(`actual-flows: signal correspondent "${name}" does not exist; skipping`);
     }
 
     return {
@@ -296,7 +296,7 @@ export function createBridge({ config, paperless, actual, parse = parseDoc } = {
     for (const name of income.tags) {
       const id = await pl.tagIdByName(name);
       if (id != null) tagIds.push(id);
-      else console.warn(`ab2pb: income tag "${name}" does not exist in Paperless; skipping`);
+      else console.warn(`actual-flows: income tag "${name}" does not exist in Paperless; skipping`);
     }
 
     const documentTypeIds = [];
@@ -304,7 +304,7 @@ export function createBridge({ config, paperless, actual, parse = parseDoc } = {
     for (const name of income.documentTypes) {
       const id = docTypes.get(name);
       if (id != null) documentTypeIds.push(id);
-      else console.warn(`ab2pb: income document type "${name}" does not exist; skipping`);
+      else console.warn(`actual-flows: income document type "${name}" does not exist; skipping`);
     }
 
     return { documentTypeIds, tagIds };
@@ -546,7 +546,7 @@ export function createBridge({ config, paperless, actual, parse = parseDoc } = {
       const existing = findDuplicateCandidate(txns, parsed, doc.id);
       if (existing != null) {
         console.log(
-          `ab2pb: doc ${doc.id} "${doc.title ?? ''}" matches existing Actual txn ${existing.id} ` +
+          `actual-flows: doc ${doc.id} "${doc.title ?? ''}" matches existing Actual txn ${existing.id} ` +
             `(amount ${existing.amount}, date ${existing.date}); tagging possible-duplicate, not importing`,
         );
         await markPossibleDuplicate(doc, parsed, customFieldIds);
@@ -669,11 +669,11 @@ export function createBridge({ config, paperless, actual, parse = parseDoc } = {
           }),
         );
       } catch (err) {
-        console.error(`ab2pb: paperless doc ${doc.id}: ${err.message ?? err}`);
+        console.error(`actual-flows: paperless doc ${doc.id}: ${err.message ?? err}`);
         try {
           await markError(doc, customFieldIds);
         } catch (statusErr) {
-          console.error(`ab2pb: failed to record error status for doc ${doc.id}: ${statusErr.message ?? statusErr}`);
+          console.error(`actual-flows: failed to record error status for doc ${doc.id}: ${statusErr.message ?? statusErr}`);
         }
         results.push({ docId: doc.id, status: 'error', error: String(err?.message ?? err) });
       }
@@ -704,7 +704,7 @@ export function createBridge({ config, paperless, actual, parse = parseDoc } = {
         try {
           await importPass();
         } catch (err) {
-          console.error(`ab2pb: poll pass failed: ${err.message ?? err}`);
+          console.error(`actual-flows: poll pass failed: ${err.message ?? err}`);
         }
         if (signal?.aborted) return;
         await new Promise((resolve) => {

@@ -37,7 +37,7 @@ export async function resolveSignalIdsReadOnly({ paperless, signals }) {
     if (id != null) {
       tagIds.push(id);
       tags.push({ entry, id });
-    } else console.warn(`ab2pb: signal tag "${name}" does not exist in Paperless; skipping`);
+    } else console.warn(`actual-flows: signal tag "${name}" does not exist in Paperless; skipping`);
   }
 
   const documentTypeIds = [];
@@ -49,7 +49,7 @@ export async function resolveSignalIdsReadOnly({ paperless, signals }) {
     if (id != null) {
       documentTypeIds.push(id);
       documentTypes.push({ entry, id });
-    } else console.warn(`ab2pb: signal document type "${name}" does not exist; skipping`);
+    } else console.warn(`actual-flows: signal document type "${name}" does not exist; skipping`);
   }
 
   const correspondentIds = [];
@@ -61,7 +61,7 @@ export async function resolveSignalIdsReadOnly({ paperless, signals }) {
     if (id != null) {
       correspondentIds.push(id);
       correspondents.push({ entry, id });
-    } else console.warn(`ab2pb: signal correspondent "${name}" does not exist; skipping`);
+    } else console.warn(`actual-flows: signal correspondent "${name}" does not exist; skipping`);
   }
 
   return {

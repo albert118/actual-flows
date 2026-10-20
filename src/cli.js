@@ -5,15 +5,15 @@ import { connect } from './actual.js';
 import { runReconcile } from './report.js';
 import { createBridge, DEFAULT_POLL_INTERVAL_MS } from './bridge.js';
 
-const USAGE = `ab2pb - Actual <-> Paperless bridge
+const USAGE = `actual-flows - Actual <-> Paperless bridge
 
 Usage:
-  ab2pb --check     Verify Paperless custom fields + Actual account, then exit
-  ab2pb --dry-run   Parse and stage imports without writing anything
-  ab2pb --import    Run a single import pass
-  ab2pb --once      Poll once and exit
-  ab2pb --poll [s]  Watch Paperless continuously (interval in seconds, default 60)
-  ab2pb --reconcile [year]
+  actual-flows --check     Verify Paperless custom fields + Actual account, then exit
+  actual-flows --dry-run   Parse and stage imports without writing anything
+  actual-flows --import    Run a single import pass
+  actual-flows --once      Poll once and exit
+  actual-flows --poll [s]  Watch Paperless continuously (interval in seconds, default 60)
+  actual-flows --reconcile [year]
                     Read-only reconcile report: signal docs without a
                     transaction, dangling paperless:<id> transactions, and
                     non-paperless transactions. Default window is the current
@@ -21,7 +21,7 @@ Usage:
                     the single FY ending 30 June of that year.
 
 Environment:
-  AB2PB_CONFIG      Path to config JSON (default ./config.json)
+  ACTUAL_FLOWS_CONFIG      Path to config JSON (default ./config.json)
   PAPERLESS_TOKEN   Paperless-ngx API token (overrides config file)
   ACTUAL_PASSWORD   Actual Budget server password (overrides config file)
   ACTUAL_SYNC_ID    Actual Budget budget sync id (overrides config file)
@@ -34,7 +34,7 @@ const KNOWN_FLAGS = new Set(['--check', '--dry-run', '--import', '--once', '--po
 const CONNECT_FLAGS = new Set(['--import', '--once', '--poll', '--reconcile']);
 
 function fail(message) {
-  console.error(`ab2pb: ${message}`);
+  console.error(`actual-flows: ${message}`);
   process.exitCode = 1;
 }
 

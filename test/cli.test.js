@@ -19,7 +19,7 @@ test('AC22: --reconcile requires config: reports the config error and exits 1', 
     () => execFileAsync(process.execPath, [CLI, '--reconcile'], { encoding: 'utf8' }),
     (err) => {
       assert.equal(err.code, 1, 'exit code 1 on missing config');
-      assert.match(err.stderr, /ab2pb: Cannot read config file/);
+      assert.match(err.stderr, /actual-flows: Cannot read config file/);
       assert.doesNotMatch(err.stderr, /not yet implemented/, 'stub behaviour is gone');
       return true;
     },
@@ -31,7 +31,7 @@ test('cli: unknown flags print usage and exit 0', async () => {
     encoding: 'utf8',
   });
 
-  assert.match(stdout, /^ab2pb - Actual <-> Paperless bridge/);
+  assert.match(stdout, /^actual-flows - Actual <-> Paperless bridge/);
   assert.match(stdout, /--reconcile/, 'usage lists the --reconcile flag');
   assert.equal(stderr, '');
 });

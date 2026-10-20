@@ -110,14 +110,14 @@ export function signalEntryAccount(entry) {
 }
 
 /**
- * Reads the bridge config (AB2PB_CONFIG or `configPath`, default ./config.json),
+ * Reads the bridge config (ACTUAL_FLOWS_CONFIG or `configPath`, default ./config.json),
  * overlays env secrets (PAPERLESS_TOKEN / ACTUAL_PASSWORD / ACTUAL_SYNC_ID), and
  * validates required fields, throwing an Error naming the missing field.
  *
  * Returns the README-friendly resolved config object.
  */
 export function loadConfig({ configPath, env = process.env } = {}) {
-  const path = configPath ?? env.AB2PB_CONFIG ?? DEFAULT_CONFIG_PATH;
+  const path = configPath ?? env.ACTUAL_FLOWS_CONFIG ?? DEFAULT_CONFIG_PATH;
 
   let raw;
   try {
