@@ -1,6 +1,6 @@
 # Actual Flows
 
-Moves finance facts between Paperless-ngx, Actual Budget and, planned, Ghostfolio. Formerly `ab2pb`.
+Moves finance facts between Paperless-ngx and Actual Budget. Formerly `ab2pb`.
 
 A standalone Node.js bridge that watches [Paperless-ngx](https://docs.paperless-ngx.com/) for newly
 ingested financial documents, parses amount/date/payee/currency from their OCR content
@@ -30,27 +30,6 @@ Data flow per pass:
    `imported_id = paperless:<id>` (dedup key).
 4. **Write back** — PATCH the Paperless document with `actual_transaction_id`, parsed fields
    (amount/date/payee/currency), and status `imported`.
-
-## Status
-
-**v1 implemented** (all core stages green, `npm test`): config validation, Paperless + Actual
-clients, AU/foreign-currency parser, import orchestration with idempotency, CLI, Docker wiring,
-documentation.
-
-**v2 in progress:**
-
-- [x] **Reconcile report** — `--reconcile [year]` (read-only) classifies the reconcile window
-      (current + previous AU financial year, or the single FY ending in `year`) into signal
-      docs without a transaction, dangling `paperless:<id>` transactions, and non-paperless
-      transactions (see [CLI reference](#cli-reference)).
-- [x] **Per-signal account mapping** — map individual signal tags/document types/correspondents
-      to distinct Actual accounts instead of one `defaultAccountName`.
-- [x] **Income-by-document-type** — an optional, distinct `incomeSignals` config section
-      (document types + tags) whose documents parse as income (positive amounts), separate from
-      the watch `signals` list.
-- [x] **Duplicate-guard** — an optional (`duplicateGuard.enabled`, default off) pre-import check
-      that flags documents which already have a matching Actual transaction as
-      `possible-duplicate` instead of importing a second copy.
 
 ## Prerequisites
 
