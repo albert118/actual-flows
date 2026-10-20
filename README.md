@@ -1,4 +1,6 @@
-# Actual Budget ↔ Paperless-ngx Bridge (`ab2pb`)
+# Actual Flows
+
+Moves finance facts between Paperless-ngx, Actual Budget and, planned, Ghostfolio. Formerly `ab2pb`.
 
 A standalone Node.js bridge that watches [Paperless-ngx](https://docs.paperless-ngx.com/) for newly
 ingested financial documents, parses amount/date/payee/currency from their OCR content
@@ -115,7 +117,7 @@ ACTUAL_SYNC_ID=<your budget sync id>
 
 The config file may keep the `"${PAPERLESS_TOKEN}"`-style placeholders; the bridge only
 requires the values to be resolvable, either inline or via the environment. You can also point
-the bridge at a different config file with `AB2PB_CONFIG=./config.json`.
+the bridge at a different config file with `ACTUAL_FLOWS_CONFIG=./config.json`.
 
 ### Mapping signals to Actual accounts
 
@@ -203,26 +205,26 @@ blocks, and set the real network name (find it with `docker network ls`):
 
 ```yaml
 services:
-  ab2pb-bridge:
+  actual-flows:
     build: .
     env_file: .env
     volumes:
-      # The bridge reads ./config.json (AB2PB_CONFIG default) from /app — mount
+      # The bridge reads ./config.json (ACTUAL_FLOWS_CONFIG default) from /app — mount
       # your config read-only. Create it first (cp config.example.json config.json).
       - ./config.json:/app/config.json:ro
       - ./data:/data
     restart: unless-stopped
     # networks:
-    #   - ab2pb-net
+    #   - actual-flows-net
 
 # networks:
-#   ab2pb-net:
+#   actual-flows-net:
 #     external: true
 #     name: <your-shared-stack-network>  # replace with the real network name
 ```
 
 - `./config.json:/app/config.json:ro` — mounts your config (created in [Configuration](#3-configuration))
-  read-only at the container path the bridge loads by default (`AB2PB_CONFIG` defaults to
+  read-only at the container path the bridge loads by default (`ACTUAL_FLOWS_CONFIG` defaults to
   `./config.json`, i.e. `/app/config.json`). Create it before `docker compose up`: a missing
   host file becomes an empty directory and the bridge exits with a parse error. The mounted
   config may keep the `${PAPERLESS_TOKEN}`-style placeholders, since the secrets arrive via
@@ -236,8 +238,8 @@ services:
 
 ## 5. CLI reference
 
-Run the bridge locally with `node src/cli.js <flags>` (or `ab2pb` once installed via
-`npm link`), or in Docker as `docker compose run --rm ab2pb-bridge <flags>`:
+Run the bridge locally with `node src/cli.js <flags>` (or `actual-flows` once installed via
+`npm link`), or in Docker as `docker compose run --rm actual-flows <flags>`:
 
 | Flag           | Behaviour                                                                 | Exit code |
 | -------------- | ------------------------------------------------------------------------- | --------- |

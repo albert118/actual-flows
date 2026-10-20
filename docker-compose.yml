@@ -11,19 +11,19 @@
 # default compose network or host networking.
 
 services:
-  ab2pb-bridge:
+  actual-flows:
     build: .
     env_file: .env
     volumes:
-      # The bridge reads ./config.json (AB2PB_CONFIG default) from /app — mount
+      # The bridge reads ./config.json (ACTUAL_FLOWS_CONFIG default) from /app — mount
       # your config read-only. Create it first (cp config.example.json config.json).
       - ./config.json:/app/config.json:ro
       - ./data:/data
     restart: unless-stopped
     # networks:
-    #   - ab2pb-net
+    #   - actual-flows-net
 
 # networks:
-#   ab2pb-net:
+#   actual-flows-net:
 #     external: true
 #     name: <your-shared-stack-network>  # replace with the real network name

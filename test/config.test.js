@@ -52,7 +52,7 @@ function mergeDeep(target, source) {
 
 let tmpDir;
 function writeConfig(overrides = {}) {
-  if (!tmpDir) tmpDir = mkdtempSync(join(tmpdir(), 'ab2pb-config-'));
+  if (!tmpDir) tmpDir = mkdtempSync(join(tmpdir(), 'actual-flows-config-'));
   const cfg = mergeDeep(structuredClone(baseConfig), overrides);
   const configPath = join(tmpDir, `config-${Math.random().toString(36).slice(2)}.json`);
   writeFileSync(configPath, JSON.stringify(cfg));
