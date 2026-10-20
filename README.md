@@ -1,6 +1,6 @@
 # Actual Flows
 
-Moves finance facts between Paperless-ngx and Actual Budget. Formerly `ab2pb`.
+Moves finance facts between Paperless-ngx and Actual Budget.
 
 A standalone Node.js bridge that watches [Paperless-ngx](https://docs.paperless-ngx.com/) for newly
 ingested financial documents, parses amount/date/payee/currency from their OCR content
